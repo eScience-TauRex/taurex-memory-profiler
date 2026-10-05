@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Unified TauREx memory toolbox — plot and compare memory profiles.
+"""Unified TauREx memory profiler — plot and compare memory profiles.
 
 Reads every memory-log format used in this project, so the old and the
 new tools can be retired:
 
   * unified      memory_<job>_<node>.csv  +  node_memory_<job>_<node>.csv
-                 (written by memory_monitor.sh, Pss and RSS)
-  * colleague's  memory_monitor.sh logs (rss only, ISO timestamps)
+                 (written by taurex_memory_profiler.monitor, Pss and RSS)
+  * colleague's  memory_monitor.sh logs (the old shell sampler: rss only,
+                 ISO timestamps)
   * legacy       mem_<config>.csv single-file Pss/RSS profiles
 
 Run it without arguments to plot the latest job found in ./memory_logs.
@@ -15,23 +16,23 @@ Everything is auto-detected from the CSV headers.
 Examples
 --------
 # latest job in ./memory_logs: overview + total
-python plot_memory.py
+taurex-mem-plot
 
 # a specific job, with the per-node and top-process breakdowns
-python plot_memory.py --job 1234567 --per-node --top 10
+taurex-mem-plot --job 1234567 --per-node --top 10
 
 # one legacy CSV
-python plot_memory.py mem_64.csv
+taurex-mem-plot mem_64.csv
 
 # compare runs (the legacy command line keeps working)
-python plot_memory.py mem_64.csv --compare mem_64_bad.csv \
+taurex-mem-plot mem_64.csv --compare mem_64_bad.csv \
     --label-a "OOM branch" --label-b "original taurex3" --title "2 nodes 64 tasks"
 
 # several unified log directories, labelled
-python plot_memory.py good=logs_good --compare bad=logs_bad --compare2 f32=logs_f32
+taurex-mem-plot good=logs_good --compare bad=logs_bad --compare2 f32=logs_f32
 
 # two jobs that live in the same log directory (the grid use case)
-python plot_memory.py mem_64_good=memory_logs#12345 \
+taurex-mem-plot mem_64_good=memory_logs#12345 \
     --compare mem_64_bad=memory_logs#12346
 """
 
@@ -171,7 +172,7 @@ def load_csv(path: Path, node: str | None = None):
 
 
 def read_meta(base: Path, jobid: str) -> dict:
-    """Read the optional run_<jobid>.meta written by mem-run."""
+    """Read the optional run_<jobid>.meta written by taurex-mem-run."""
     for name in (f"run_{jobid}.meta", "run.meta"):
         path = base / name
         if path.is_file():

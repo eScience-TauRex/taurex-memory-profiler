@@ -1,4 +1,4 @@
-# TauREx memory toolbox
+# TauREx memory profiler
 
 Measure and plot where the memory of a TauREx run goes: per node, per MPI rank,
 and per process, with optional CPU profiling and timing from the same run.
@@ -6,83 +6,82 @@ and per process, with optional CPU profiling and timing from the same run.
 * per-process **RSS, Pss, RssAnon/RssFile/RssShmem, VmSize, VmPeak** and threads
 * node memory against the **physical memory**, the Slurm **`--mem`** limit and
   the job **cgroup** counter (the number the OOM killer uses)
-* one monitor per node, so multi-node runs are covered
+* one sampler per node, so multi-node runs are covered
 * Pss by default, which counts MPI-shared pages (opacities) once
 * 2- and many-way comparisons, per-node and top-N breakdowns, OOM detection
 * optional py-spy CPU flamegraph and wall-clock/fit/sampling timing
 * peak memory from `sacct` when a run had no monitor
 * a shareable markdown report
 
-| file | role |
-|---|---|
-| [`mem-run`](./mem-run)                 | run any command with the monitor beside it — the one-liner |
-| [`memory_monitor.sh`](./memory_monitor.sh) | samples node + every process into two CSVs per node |
-| [`plot_memory.py`](./plot_memory.py)   | all the figures, the text summary and the report |
-| [`tests/test_plot_memory.py`](./tests/test_plot_memory.py) | self-contained checks |
-| [`pyproject.toml`](./pyproject.toml)   | dependencies, the `memory-plot` command and the test/lint config |
+Two commands, one per side of a run:
 
-Requirements: bash ≥ 4.2, GNU awk, `pgrep`, and `python3` with `numpy`, `pandas`
-and `matplotlib`. `py-spy` only if you want the CPU flamegraph.
+| command | module | role |
+|---|---|---|
+| `taurex-mem-run` | [`runner.py`](./src/taurex_memory_profiler/runner.py) | run any command with the sampler beside it — the one-liner |
+| `taurex-mem-plot` | [`plot.py`](./src/taurex_memory_profiler/plot.py) | all the figures, the text summary and the report |
+| `python -m taurex_memory_profiler.monitor` | [`monitor.py`](./src/taurex_memory_profiler/monitor.py) | the per-node sampler `taurex-mem-run` starts (also usable standalone) |
 
-Everything can be driven from the toolbox directory; the only thing you have to
-decide is where the sampler writes and reads its logs (`-o` / `--logdir`,
-default `./memory_logs`).
+`python -m taurex_memory_profiler` is the plotter, so the package is usable even
+without the console scripts on `PATH`.
+
+Requires Python ≥ 3.9 and Linux (`/proc`); `py-spy` only if you want the CPU
+flamegraph. Everything else (`numpy`, `pandas`, `matplotlib`) comes with the
+install.
 
 ## Install
 
 ```bash
-cd memory_toolbox
-python3 -m venv .venv && source .venv/bin/activate
+pip install git+https://github.com/eScience-TauRex/taurex-memory-profiler
+pip install "taurex-memory-profiler[pyspy] @ git+https://github.com/eScience-TauRex/taurex-memory-profiler"  # + py-spy
+```
 
+From a checkout, preferably in a virtual environment:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e .            # numpy, pandas, matplotlib
 pip install -e ".[pyspy]"   # …plus py-spy, for the CPU flamegraph
 ```
 
-That gives you the same plotter as a `memory-plot` command (`memory-plot` and
-`python plot_memory.py` are interchangeable). The shell side is not a Python
-package: put `mem-run` and `memory_monitor.sh` on your `PATH`, or spell out
-`memory_toolbox/mem-run` as in the examples below. On a cluster the interpreter
-often comes from a module, and `pip install -e .` is then only needed once per
-environment.
-
-The checks need no test runner — `python tests/test_plot_memory.py` — but
-`pip install -e ".[tests]"` adds pytest if you prefer `pytest tests/`.
+The sampler is started with the **same interpreter** as `taurex-mem-run`, so on a
+cluster install the package into the environment the job activates and it is
+available on every node through `srun`. The only thing left to decide is where
+the sampler writes and reads its logs (`-o` / `--logdir`, default
+`./memory_logs`).
 
 ## Quick start
 
 ```bash
-cd memory_toolbox
-
-# 1. monitored run: prefix your MPI command with mem-run and give it a label
-mem-run -l mem_64_good -- mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
+# 1. monitored run: prefix your MPI command with taurex-mem-run and give it a label
+taurex-mem-run -l mem_64_good -- mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
 
 # 2. plot the latest run in ./memory_logs
-python plot_memory.py
+taurex-mem-plot
 
 # 3. compare a group of runs (see "Working with a grid of runs")
-python plot_memory.py --logdir memory_logs --select 'mem_64_*' \
+taurex-mem-plot --logdir memory_logs --select 'mem_64_*' \
     --report memory_logs/report_64.md
 ```
 
 ---
 
-## Running a job under the monitor: `mem-run`
+## Running a job under the sampler: `taurex-mem-run`
 
 ```bash
-mem-run [options] [--] COMMAND [ARGS...]
+taurex-mem-run [options] [--] COMMAND [ARGS...]
 ```
 
-`mem-run` is a wrapper: it starts one `memory_monitor.sh` per node, waits for the
-first samples, runs your command, stops the monitors on every exit path (so the
-CSVs survive an OOM kill), writes `run_<jobid>.meta`, and prints the command to
-plot the result. **It returns your command's exit code unchanged**, so `sbatch`
-still reports a failed or killed retrieval as such.
+`taurex-mem-run` starts one `taurex_memory_profiler.monitor` per node, waits for
+the first samples, runs your command, stops the samplers on every exit path (so
+the CSVs survive an OOM kill), writes `run_<jobid>.meta`, and prints the command
+to plot the result. **It returns your command's exit code unchanged**, so
+`sbatch` still reports a failed or killed retrieval as such.
 
 An existing job script changes in exactly one line:
 
 ```diff
 -mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
-+mem-run -l mem_128_good -- mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
++taurex-mem-run -l mem_128_good -- mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
 ```
 
 Everything else — modules, venv, `#SBATCH` lines, `-np 256` — stays in your
@@ -102,10 +101,9 @@ module load 2025 foss/2025b Python/3.13.5-GCCcore-14.3.0
 export LD_LIBRARY_PATH=/projects/prjs1336/Software/2026/MultiNest/lib:$LD_LIBRARY_PATH
 source /projects/prjs1336/Software/2026/taurex34/bin/activate
 
-mem-run -l mem_128_good -- mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
+pip install git+https://github.com/eScience-TauRex/taurex-memory-profiler  # once per environment
+taurex-mem-run -l mem_128_good -- mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
 ```
-
-Put `mem-run` on your `PATH`, or spell out `memory_toolbox/mem-run` as above.
 
 ### Options
 
@@ -120,34 +118,34 @@ Put `mem-run` on your `PATH`, or spell out `memory_toolbox/mem-run` as above.
 | `--pyspy-rate HZ` | `100` | py-spy sampling rate |
 | `--pyspy-out FILE` | `profile_<label>.svg` | py-spy output file |
 
-Environment: `MEM_MONITOR` (path to `memory_monitor.sh`, default next to
-`mem-run`), `MEM_RUN_WAIT` (seconds to wait for the first samples, default
-`2*interval + 2`). Under Slurm the monitors run as one overlapping `srun` step
-per node; without Slurm only the local node is monitored, which makes `mem-run`
-usable on a login node for short tests.
+Environment: `MEM_INTERVAL` and `MEM_PATTERN` seed the matching options,
+`MEM_RUN_WAIT` sets how long to wait for the first samples (default
+`2*interval + 2`). Under Slurm the samplers run as one overlapping `srun` step
+per node; without Slurm only the local node is sampled, which makes
+`taurex-mem-run` usable on a login node for short tests.
 
 ### CPU profile and timing (`--pyspy`)
 
 `--pyspy` wraps the run in `py-spy record --subprocesses` (so the MPI ranks are
 followed too) and writes a flamegraph. The `Samples: N` line py-spy prints is
-read back by `plot_memory.py`, which puts the CPU cost next to the memory cost.
+read back by the plotter, which puts the CPU cost next to the memory cost.
 Requires `pip install py-spy`; the job fails immediately with a clear message if
 it is missing. A 128-rank flamegraph is large, so use `--pyspy-out` to keep it
 out of the way.
 
 ---
 
-## Plotting: `plot_memory.py`
+## Plotting: `taurex-mem-plot`
 
 ```bash
-python plot_memory.py [RUN ...] [options]
+taurex-mem-plot [RUN ...] [options]     # or: python -m taurex_memory_profiler
 ```
 
 ### Choosing what to plot
 
 | you have | command |
 |---|---|
-| one log directory, most recent run | `python plot_memory.py` |
+| one log directory, most recent run | `taurex-mem-plot` |
 | several jobs in one directory | `--job 12345` for one, `--select 'mem_64_*'` for all matching |
 | one directory per run | `good=logs_good --compare bad=logs_bad` |
 | individual CSVs | `mem_64.csv --compare mem_64_bad.csv` |
@@ -209,7 +207,7 @@ job id), use the Slurm accounting:
 
 ```bash
 sacct -j 26968927 -P --format=JobID,Elapsed,MaxRSS,MaxVMSize,AveRSS > sacct_26968927.txt
-python plot_memory.py sacct_26968927.txt --compare mem_64_good=memory_logs#12345
+taurex-mem-plot sacct_26968927.txt --compare mem_64_good=memory_logs#12345
 ```
 
 The dump is detected by its `MaxRSS` column; it contributes a peak to the
@@ -241,7 +239,7 @@ Measuring across the whole grid at once, the report lines up every run, so the
 peaks and timings can be read across the grid in one table:
 
 ```bash
-python plot_memory.py --logdir memory_logs --select 'mem_*' \
+taurex-mem-plot --logdir memory_logs --select 'mem_*' \
     --report memory_logs/report_grid.md
 ```
 
@@ -249,7 +247,7 @@ Or one report per axis value, e.g. for a scaling study:
 
 ```bash
 for cfg in 32 64 128; do
-    python plot_memory.py --logdir memory_logs --select "mem_${cfg}_*" \
+    taurex-mem-plot --logdir memory_logs --select "mem_${cfg}_*" \
         --title "${cfg} ranks/node" --report "memory_logs/report_${cfg}.md"
 done
 ```
@@ -276,25 +274,25 @@ the per-node table. Copy them next to the logs, or commit them with the results.
 
 ---
 
-## `memory_monitor.sh` (used by `mem-run`)
+## The sampler: `python -m taurex_memory_profiler.monitor`
 
-Normally you never call this directly; `mem-run` does. Run it standalone to
-attach the sampler to something already running:
+Normally you never call this directly; `taurex-mem-run` does, once per node. Run
+it standalone to attach the sampler to something already running:
 
 ```bash
-./memory_monitor.sh [-o OUTDIR] [-i INTERVAL] [-p PATTERN] [-j JOBID]
+python -m taurex_memory_profiler.monitor [-o OUTDIR] [-i INTERVAL] [-p PATTERN] [-j JOBID]
 ```
 
 | option | default | meaning |
 |---|---|---|
-| `-o, --outdir` | `memory_logs` | where the CSVs go |
+| `-o, --outdir` | `memory_logs` (`$MEM_OUTDIR`) | where the CSVs go |
 | `-i, --interval` | `5` (`$MEM_INTERVAL`) | seconds between samples, may be < 1 |
-| `-p, --pattern` | `.` | only track process names matching this regex |
+| `-p, --pattern` | `.` (`$MEM_PATTERN`) | only track process names matching this regex |
 | `-j, --jobid` | `$SLURM_JOB_ID` or `local` | used in the file names |
 
-Stop it with `SIGTERM`, or (from another shell) by creating
-`<outdir>/.stop_<jobid>` — that file is also how `mem-run` stops every node at
-once.
+Stop it with `SIGTERM`/`SIGINT`, or (from another shell) by creating
+`<outdir>/.stop_<jobid>` — that file is also how `taurex-mem-run` stops every
+node at once.
 
 It writes, per node:
 
@@ -310,7 +308,7 @@ Node columns: `timestamp,node,mem_total_kb,mem_available_kb,mem_used_kb,`
 `mem_used_percent,cgroup_mem_kb,swap_used_kb,shmem_kb,load1,load5,load15,`
 `user_procs,user_rss_kb,user_pss_kb,user_rss_anon_kb,elapsed_s`.
 
-The CSVs are line-buffered, so they survive an OOM kill.
+The CSVs are written and flushed sample by sample, so they survive an OOM kill.
 
 > Keep the interval sane: 5 s over 48 h and 128 ranks is ~300 MB per node, while
 > 0.01 s would be ~100 GB. Sub-second sampling is only for short runs.
@@ -334,5 +332,32 @@ The CSVs are line-buffered, so they survive an OOM kill.
   to RSS only when the whole column is empty.
 * **OOM not marked** — detection scans the `*.out` logs next to the run for
   `oom_kill` / `Out of memory`; use `--killed` when the log is elsewhere.
-* **`mem-run` not found** — it must be reachable from the job; put it on `PATH`
-  or use a path relative to the submit directory (Slurm starts jobs there).
+* **`taurex-mem-run` not found** — install the package into the environment the
+  job activates, *before* the `taurex-mem-run` line, so `PATH` is set up by the
+  time Slurm runs the job.
+* **`No module named taurex_memory_profiler` in the sampler output** — the
+  environment is not visible from the other nodes; install into a shared
+  filesystem (`/projects`, `/home`) rather than a node-local one.
+
+---
+
+## Development
+
+```bash
+pip install -e ".[tests]"
+pytest                       # or, no test runner needed:
+python tests/test_plot.py
+python tests/test_monitor.py
+python tests/test_runner.py
+```
+
+The checks call the command line, so they exercise exactly what a user types;
+`tests/_helpers.py` puts `src/` on `PYTHONPATH`, which makes a plain checkout
+work uninstalled. CI runs them on Python 3.9 and 3.13.
+
+```
+src/taurex_memory_profiler/
+    monitor.py   per-node sampler: reads /proc, writes the two CSVs
+    runner.py    taurex-mem-run: starts the samplers and runs the command
+    plot.py      taurex-mem-plot: figures, text summary and report
+```

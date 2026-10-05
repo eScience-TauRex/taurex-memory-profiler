@@ -3,14 +3,15 @@ requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "taurex-memory-toolbox"
-version = "0.1.0"
+name = "taurex-memory-profiler"
+version = "0.2.0"
 description = "Measure and plot where the memory of a TauREx run goes: per node, per MPI rank and per process"
 readme = "README.md"
 requires-python = ">=3.9"
 keywords = ["memory", "profiling", "mpi", "slurm", "taurex", "exoplanets"]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
     "Topic :: Scientific/Engineering :: Astronomy",
     "Topic :: System :: Monitoring",
 ]
@@ -20,19 +21,23 @@ dependencies = [
     "matplotlib",
 ]
 
+[project.urls]
+Repository = "https://github.com/eScience-TauRex/taurex-memory-profiler"
+
 [project.optional-dependencies]
 pyspy = ["py-spy"]
 tests = ["pytest"]
 
 [project.scripts]
-memory-plot = "plot_memory:main"
+taurex-mem-run = "taurex_memory_profiler.runner:main"
+taurex-mem-plot = "taurex_memory_profiler.plot:main"
 
-[tool.setuptools]
-# the toolbox is a handful of scripts, plot_memory.py is the only importable one
-py-modules = ["plot_memory"]
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = "-q"
 
 [tool.ruff]

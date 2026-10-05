@@ -1,29 +1,26 @@
 #!/usr/bin/env python3
-"""Self-contained checks for the memory toolbox.
+"""Self-contained checks for the plots of the memory profiler.
 
 Run directly (no pytest needed):
 
-    python tests/test_plot_memory.py
+    python tests/test_plot.py
 
 or, if pytest is available:
 
-    pytest tests/test_plot_memory.py
+    pytest tests/test_plot.py
 """
 
 from __future__ import annotations
 
 import csv
 import datetime as dt
-import os
-import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent
-PLOT = HERE.parent / "plot_memory.py"
-MEM_RUN = HERE.parent / "mem-run"
-MONITOR = HERE.parent / "memory_monitor.sh"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _helpers import PLOT, call  # noqa: E402  (needs the path tweak above)
 
 
 def _fmt(t: dt.datetime) -> str:
@@ -113,8 +110,8 @@ def write_legacy(path: Path, label="64", ranks=4, samples=12, killed_run=False):
 
 
 def run_plot(*args, cwd=None):
-    cmd = [sys.executable, str(PLOT), *[str(a) for a in args]]
-    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    cmd = [*PLOT, *[str(a) for a in args]]
+    proc = call(cmd, cwd=cwd)
     if proc.returncode != 0:
         raise AssertionError(f"{' '.join(cmd)} failed:\n{proc.stdout}\n{proc.stderr}")
     return proc.stdout
@@ -194,8 +191,8 @@ def test_unknown_job_fails_cleanly():
     with tempfile.TemporaryDirectory() as tmp:
         logs = Path(tmp) / "memory_logs"
         write_unified(logs)
-        cmd = [sys.executable, str(PLOT), "--logdir", str(logs), "--job", "nope"]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        cmd = [*PLOT, "--logdir", str(logs), "--job", "nope"]
+        proc = call(cmd)
         assert proc.returncode != 0
         assert "No logs for job" in proc.stderr
 
@@ -280,32 +277,6 @@ def test_sacct_fallback_and_compare():
         assert (tmp / "compare_mem_64_vs_sacct_12345.png").is_file(), out
 
 
-def test_mem_run_one_liner():
-    """mem-run starts the sampler, runs the command and returns its exit code."""
-    if not MEM_RUN.exists():
-        return  # shell wrapper not shipped
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        env = dict(os.environ, MEM_RUN_WAIT="1", MEM_MONITOR=str(MONITOR))
-
-        proc = subprocess.run(
-            ["bash", str(MEM_RUN), "-i", "1", "-j", "4242", "-l", "oneliner",
-             "--", "bash", "-c", "sleep 2"],
-            cwd=tmp, env=env, capture_output=True, text=True)
-        assert proc.returncode == 0, proc.stdout + proc.stderr
-        assert (tmp / "memory_logs" / "run_4242.meta").is_file()
-        assert list((tmp / "memory_logs").glob("memory_4242_*.csv")), proc.stdout
-        assert list((tmp / "memory_logs").glob("node_memory_4242_*.csv")), proc.stdout
-        assert "Job Started:" in proc.stdout and "Job Finished:" in proc.stdout
-        assert "label=oneliner" in (tmp / "memory_logs" / "run_4242.meta").read_text()
-
-        proc = subprocess.run(
-            ["bash", str(MEM_RUN), "-i", "1", "-j", "4243",
-             "--", "bash", "-c", "exit 3"],
-            cwd=tmp, env=env, capture_output=True, text=True)
-        assert proc.returncode == 3, proc.stdout + proc.stderr
-
-
 def test_select_picks_a_whole_grid():
     """--select 'mem_64_*' plots all three variants of one node config."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -325,8 +296,8 @@ def test_select_picks_a_whole_grid():
             assert label in out, out
         assert "## Memory" in (logs / "grid.md").read_text()
 
-        cmd = [sys.executable, str(PLOT), "--logdir", str(logs), "--select", "nope*"]
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        cmd = [*PLOT, "--logdir", str(logs), "--select", "nope*"]
+        proc = call(cmd)
         assert proc.returncode != 0
         assert "matches" in proc.stderr
 

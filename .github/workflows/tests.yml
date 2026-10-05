@@ -18,5 +18,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install
         run: pip install -e ".[tests]"
+      - name: Smoke-test the commands
+        run: taurex-mem-plot --help && taurex-mem-run --help
       - name: Run the checks
         run: pytest
