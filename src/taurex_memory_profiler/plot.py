@@ -57,6 +57,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .outputs import checked_any, compare_runs, format_checks, report_lines
+
 KB_PER_GB = 1024.0 ** 2
 DEFAULT_LIMIT_GB = 224.0
 DEFAULT_PROJECT_RANKS = 128
@@ -862,6 +864,82 @@ def plot_compare(runs: list[Run], base: Path, limit_gb: float, title: str | None
                       f"  ({diff / peaks[first] * 100:+.1f}%)")
 
 
+def output_name(name: str, limit: int = 42) -> str:
+    """The tail of a long dataset path, so it fits next to an axis."""
+    if len(name) <= limit:
+        return name
+    parts = name.split("/")
+    short = parts[-1]
+    for part in reversed(parts[:-1]):
+        if len(short) + len(part) + 1 > limit:
+            break
+        short = f"{part}/{short}"
+    return short if short == name else "…/" + short
+
+
+def fmt_value(value: float) -> str:
+    return f"{value:.4g}" if np.isfinite(value) else "inf"
+
+
+def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
+    """Draw where the output of one run moved compared with the baseline run.
+
+    The bars are the datasets that are outside the tolerance, worst first, each
+    labelled with the value of its worst element in both runs; the datasets that
+    are identical are counted instead of drawn, so the panel stays readable.
+    """
+    measured = [d for d in check.datasets if d.rel is not None]
+    failing = [d for d in measured if not d.same]
+    identical = sum(1 for d in measured if not d.rel)
+
+    fig, ax = plt.subplots(figsize=(12, max(3.2, 1.5 + 0.34 * len(failing[:15]))))
+    fig.patch.set_facecolor("#fcfcfb")
+
+    shown = failing[:15]
+    if shown:
+        finite = [d.rel for d in shown if np.isfinite(d.rel)]
+        top = max(finite) if finite else 1.0
+        positions = np.arange(len(shown))[::-1]      # worst at the top
+        ax.barh(positions, [d.rel if np.isfinite(d.rel) else top for d in shown],
+                color=OOM_RED, height=0.62)
+        for pos, diff in zip(positions, shown):
+            note = "no change" if not diff.rel else f"{fmt_value(diff.left)} → {fmt_value(diff.right)}"
+            ax.annotate(f"{note}", (diff.rel if np.isfinite(diff.rel) else top, pos),
+                        xytext=(5, 0), textcoords="offset points", va="center",
+                        fontsize=8.5, color=INK2)
+        ax.set_yticks(positions)
+        ax.set_yticklabels([output_name(d.name) for d in shown], fontsize=8.5, color=INK2)
+        ax.set_xscale("log")
+        ax.set_xlim(left=min(finite) / 3 if finite else 1e-3, right=top * 60)
+    else:
+        ax.axis("off")
+        lines = check.diffs[:6] + check.notes[:4]
+        if lines:
+            text, color, size = "\n".join(lines), INK2, 9.5
+            weight, family = "normal", "monospace"
+        else:
+            largest = max((d.rel for d in measured), default=0.0)
+            text = (f"all {check.total} datasets within rtol {rtol:g}\n"
+                    f"largest relative difference {largest:.3g}")
+            color, size, weight, family = AQUA, 12, "bold", "sans-serif"
+        ax.text(0.01, 0.98, text, va="top", fontsize=size, color=color,
+                family=family, fontweight=weight)
+
+    style(ax, f"Output check: {check.label} vs {baseline_label}",
+          xlabel="relative difference  max|a-b| / max|b|")
+    verdict = (f"✓ {check.total} datasets within rtol {rtol:g}" if check.same else
+               f"✗ {len(check.diffs) + len(check.notes)} of {check.total} datasets "
+               f"outside rtol {rtol:g}")
+    ax.annotate(verdict, (0.995, 0.02), xycoords="axes fraction", ha="right",
+                fontsize=10.5, fontweight="bold",
+                color=AQUA if check.same else OOM_RED)
+    fig.text(0.01, 0.005,
+             f"{check.path.name} vs {check.baseline.name} — {identical} identical "
+             f"datasets not drawn", fontsize=8.5, color=MUTED)
+    fig.tight_layout(rect=(0, 0.02, 1, 1))
+    save_fig(fig, base)
+
+
 def print_summary(run: Run, limit_gb: float, project_ranks: int):
     print(f"\n=== {run.label} ({run.source}) ===")
     if run.proc is not None:
@@ -957,7 +1035,8 @@ def plot_peaks(runs: list[Run], base: Path, title: str | None = None):
 # Markdown report
 # ----------------------------------------------------------------------
 
-def write_report(runs: list[Run], path: Path, limit_gb: float, project_ranks: int):
+def write_report(runs: list[Run], path: Path, limit_gb: float, project_ranks: int,
+                 checks: list | None = None, rtol: float = 1e-6):
     """Small shareable report: memory peaks plus the timing side by side."""
     lines = ["# TauREx memory report", ""]
     lines.append("* baseline: `{}`".format(runs[0].label))
@@ -1023,6 +1102,9 @@ def write_report(runs: list[Run], path: Path, limit_gb: float, project_ranks: in
     lines += ["", f"Projected to {project_ranks} ranks/node, memory is assumed to scale "
                   "with the rank count; check the per-rank numbers before trusting it.", ""]
 
+    if checks:
+        lines += report_lines(checks, rtol)
+
     path.write_text("\n".join(lines) + "\n")
     print(f"Saved report to {path}")
 
@@ -1072,6 +1154,18 @@ def parse_args(argv=None):
     parser.add_argument("--no-overview", action="store_true", help="skip the overview figure")
     parser.add_argument("--no-total", action="store_true", help="skip the total figure")
     parser.add_argument("--title", default=None, help="custom title for the comparison figure")
+    parser.add_argument("--check-output", action="append", default=None,
+                        metavar="[LABEL=]FILE",
+                        help="override the output file compared across the runs "
+                             "(the check is automatic: it uses the -o recorded in "
+                             "run_<jobid>.meta, and compares HDF5 dataset by dataset "
+                             "or anything else byte by byte)")
+    parser.add_argument("--no-check-output", action="store_true",
+                        help="do not compare the outputs of the compared runs")
+    parser.add_argument("--output-rtol", type=float, default=1e-6,
+                        help="relative tolerance for the output check [1e-06]")
+    parser.add_argument("--output-atol", type=float, default=0.0,
+                        help="absolute tolerance for the output check [0]")
     parser.add_argument("--report", default=None, metavar="PATH",
                         help="also write a short markdown report of peaks and timings")
     parser.add_argument("--killed", dest="killed", action="store_true", default=None,
@@ -1185,6 +1279,25 @@ def main(argv=None):
     for run in runs:
         print_summary(run, args.limit_gb, args.project_ranks)
 
+    checks: list = []
+    if len(runs) > 1 and not args.no_check_output:
+        explicit = {}
+        for spec in args.check_output or []:
+            spec_label, spec_path, _ = split_spec(spec)
+            explicit[spec_label] = str(spec_path)
+        try:
+            checks = compare_runs(runs, explicit, args.output_rtol, args.output_atol)
+        except RuntimeError as exc:
+            sys.exit(f"ERROR: {exc}")
+        if checked_any(checks) or explicit:
+            print(format_checks(checks, runs[0].label, args.output_rtol))
+        for check in checks:
+            if check.datasets:
+                plot_output_check(
+                    check,
+                    out_root / f"outputs_{safe(runs[0].label)}_vs_{safe(check.label)}",
+                    args.output_rtol, runs[0].label)
+
     # --compare also draws each run on its own, so the runs are readable one by
     # one before they are overlaid.
     make_single = len(runs) == 1 or args.per_run or bool(args.compare or args.compare2)
@@ -1208,7 +1321,8 @@ def main(argv=None):
     if args.report:
         report_path = Path(args.report)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        write_report(runs, report_path, args.limit_gb, args.project_ranks)
+        write_report(runs, report_path, args.limit_gb, args.project_ranks,
+                     checks=checks, rtol=args.output_rtol)
 
 
 if __name__ == "__main__":

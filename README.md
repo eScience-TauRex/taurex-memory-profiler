@@ -19,14 +19,16 @@ Two commands, one per side of a run:
 |---|---|---|
 | `taurex-mem-run` | [`runner.py`](./src/taurex_memory_profiler/runner.py) | run any command with the sampler beside it — the one-liner |
 | `taurex-mem-plot` | [`plot.py`](./src/taurex_memory_profiler/plot.py) | all the figures, the text summary and the report |
+| — | [`outputs.py`](./src/taurex_memory_profiler/outputs.py) | the output check of `taurex-mem-plot`: did the compared runs write the same result |
 | `python -m taurex_memory_profiler.monitor` | [`monitor.py`](./src/taurex_memory_profiler/monitor.py) | the per-node sampler `taurex-mem-run` starts (also usable standalone) |
 
 `python -m taurex_memory_profiler` is the plotter, so the package is usable even
 without the console scripts on `PATH`.
 
 Requires Python ≥ 3.9 and Linux (`/proc`); `py-spy` only if you want the CPU
-flamegraph. Everything else (`numpy`, `pandas`, `matplotlib`) comes with the
-install.
+flamegraph, and `h5py` only if the compared runs write HDF5 outputs (the output
+check stops with a clear message when it meets an HDF5 file without `h5py`).
+Everything else (`numpy`, `pandas`, `matplotlib`) comes with the install.
 
 ## Install
 
@@ -41,6 +43,7 @@ From a checkout, preferably in a virtual environment:
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .            # numpy, pandas, matplotlib
 pip install -e ".[pyspy]"   # …plus py-spy, for the CPU flamegraph
+pip install -e ".[hdf5]"    # …plus h5py, to check HDF5 outputs dataset by dataset
 ```
 
 The sampler is started with the **same interpreter** as `taurex-mem-run`, so on a
@@ -189,8 +192,11 @@ job unless `--job` or `--select` is given.
 | `--per-node` | also draw one line per node |
 | `--top N` | also draw the top-N processes by peak memory |
 | `--per-run` | with several runs, also write the per-run figures (implied by `--compare`) |
-| `--report PATH` | also write a markdown report (peaks, limits, timings) |
+| `--report PATH` | also write a markdown report (peaks, limits, timings, output check) |
 | `--title TEXT` | custom title for the comparison figure |
+| `--check-output [LABEL=]FILE` | override which output file is compared (automatic: the `-o` of each run) |
+| `--no-check-output` | skip that check |
+| `--output-rtol`, `--output-atol` | tolerances of the output check [1e-06, 0] |
 | `--output-dir DIR` | where to write the figures |
 | `--killed` / `--not-killed` | force the OOM marker instead of auto-detecting it |
 
@@ -199,19 +205,38 @@ job unless `--job` or `--select` is given.
 Figures (PNG) are written next to the logs, in the current directory when
 the runs come from several directories, or wherever `--output-dir` points:
 
-* `memory_<label>.png` — overview: node memory used vs the physical memory, the
-  Slurm `--mem` allocation and the cgroup counter, one column per node, with the
-  per-rank smallest/average/largest below it.
+* `memory_<label>.png` — overview, one column per node (below).
 * `memory_<label>_total.png` — total memory over time (all ranks, all nodes).
 * `compare_<a>_vs_<b>[_vs_...].png` — overlay of the runs, with a peak table.
+* `outputs_<baseline>_vs_<label>.png` — the output check (below).
 * `memory_<label>_peak.png` — bar chart of the peak, for runs that only have an
   `sacct` dump.
 * `memory_<label>_per_node.png`, `memory_<label>_top<N>.png` — optional breakdowns.
+
+Typical output, comparing two 2-node runs of 256 ranks:
+
+![memory overview](docs/overview.png)
+*`memory_<label>.png` — one column per node: memory used (Pss) against the
+physical memory, the Slurm `--mem` allocation and the cgroup counter, with the
+per-rank smallest/average/largest underneath.*
+
+![comparison](docs/comparison.png)
+*`compare_<a>_vs_<b>.png` — the runs overlaid, with the peak table and the `--mem`
+limit.*
+
+![output check](docs/output-check.png)
+*`outputs_<baseline>_vs_<label>.png` — did the compared runs produce the same
+result: the datasets whose values moved, worst first, with the value on both
+sides, and the verdict in the corner.*
 
 With `--compare`, every compared run gets its own `memory_<label>.png` and
 `memory_<label>_total.png` first, so each run can be read on its own and the
 `compare_*.png` overlay is written last. `--per-run` does the same for several
 runs that were not given with `--compare`.
+
+The [output check](#check-the-runs-did-the-same-work) runs first: it prints to the
+terminal and draws its own `outputs_*.png` figure, and with `--report` it also
+becomes a table in the markdown.
 
 The text summary and the report give the peak total, the peak per node (next to
 the `--mem` limit), the per-rank statistics with the extrapolation to
@@ -303,6 +328,54 @@ for cfg in 32 64 128; do
 done
 ```
 
+### Check the runs did the same work
+
+Memory is only comparable if the runs produced the same result, so every
+`--compare` also checks their outputs and says so before drawing anything:
+
+```
+--- Output check (baseline mem_256_original) ---
+mem_256_oom: output_oom.hdf5 - DIFFERENT from output.hdf5 (332 of 423 datasets, largest 2.09 relative)
+    - Output/Solutions/solution0/fit_params/log_lee_mie_radius/nest_map: relative difference 2.09 (-2.90606 vs -0.940162)
+    - ModelParameters/Planet/mass_kg: relative difference 1 (0.12 vs 2.27775e+26)
+    - ... and 330 more
+```
+
+The file is the `-o` of the command recorded in each run's `run_<jobid>.meta`,
+looked up next to the logs and one directory up — the same name per run is not
+required, so `output.hdf5` and `output_oom.hdf5` compare fine. Point at it
+manually when the run was started outside `taurex-mem-run`:
+
+```bash
+taurex-mem-plot --compare mem_256_original mem_256_oom \
+    --check-output output.hdf5 --check-output mem_256_oom=output_oom.hdf5
+```
+
+A `[LABEL=]FILE` applies to that run, a plain `FILE` to every run. What is
+compared:
+
+| file | comparison |
+|---|---|
+| `.h5` / `.hdf5` | every dataset, within `--output-rtol`/`--output-atol`, plus the structure |
+| anything else | bytes |
+
+Every compared run is checked against the first (baseline) one, and the verdict
+is `same` or `DIFFERENT`. Differences are listed worst first; a dataset's
+**relative difference** is `max|a-b| / max|b|`, so it is not inflated by elements
+that are close to zero — 0.01 means the dataset changed by one percent of its own
+size, 1 that it changed completely. Two files of different kinds (an HDF5 against
+a text file) are reported as such instead of being compared. Use
+`--no-check-output` to skip the check, and `--report` to get the same table in
+the markdown.
+
+The check always draws a figure next to the others,
+`outputs_<baseline>_vs_<label>.png`: one bar per dataset that is outside the
+tolerance, longest first, each labelled with the value of the worst element in
+both runs, and the verdict in the corner. The datasets that are identical are
+counted under the panel instead of drawn, and when everything agrees the panel
+just states the largest difference, so a glance is enough to tell whether the
+runs are compatible.
+
 ### Read the comparison
 
 * **Peak per node against `--mem`** is the headline: it tells you whether the run
@@ -320,8 +393,8 @@ done
 ### Share it
 
 The `--report` markdown plus the PNG figures are self-contained: they list
-the runs, the peaks against the limit, the relative differences, the timings and
-the per-node table. Copy them next to the logs, or commit them with the results.
+the runs, the peaks against the limit, the relative differences, the timings, the
+output check, and the per-node table. Copy them next to the logs, or commit them with the results.
 
 ---
 
@@ -376,6 +449,9 @@ The CSVs are written and flushed sample by sample, so they survive an OOM kill.
   directory, as the example does.
 * **No comparison figure** — a single run gives the overview and total figures; a
   comparison needs two or more runs.
+* **Output check says "not checked"** — no output file was recorded in
+  `run_<jobid>.meta` (or the run was started by hand); pass `--check-output FILE`,
+  or `--no-check-output` if the runs are meant to differ.
 * **`--select` matches nothing** — it matches the label from
   `run_<jobid>.meta` or the job id; the error lists what is available.
 * **`pss_kb` is 0 for some processes** — `/proc/<pid>/smaps_rollup` was not
@@ -411,4 +487,6 @@ src/taurex_memory_profiler/
     monitor.py   per-node sampler: reads /proc, writes the two CSVs
     runner.py    taurex-mem-run: starts the samplers and runs the command
     plot.py      taurex-mem-plot: figures, text summary and report
+    outputs.py   the output check: same result in every compared run
+docs/            the figures shown above, from a 2-node 256-rank comparison
 ```
