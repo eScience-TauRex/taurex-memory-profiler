@@ -364,9 +364,11 @@ is `same` or `DIFFERENT`. Differences are listed worst first; a dataset's
 **relative difference** is `max|a-b| / max|b|`, so it is not inflated by elements
 that are close to zero — 0.01 means the dataset changed by one percent of its own
 size, 1 that it changed completely. Two files of different kinds (an HDF5 against
-a text file) are reported as such instead of being compared. Use
-`--no-check-output` to skip the check, and `--report` to get the same table in
-the markdown.
+a text file) are reported as such instead of being compared. An HDF5 output that
+cannot be read at all — the truncated file an OOM-killed run leaves behind, for
+instance — is reported as `unreadable output` instead of aborting the
+comparison. Use `--no-check-output` to skip the check, and `--report` to get the
+same table in the markdown.
 
 The check always draws a figure next to the others,
 `outputs_<baseline>_vs_<label>.png`: one bar per dataset that is outside the
@@ -458,7 +460,9 @@ The CSVs are written and flushed sample by sample, so they survive an OOM kill.
   readable for them (usually processes of another user). The plotter falls back
   to RSS only when the whole column is empty.
 * **OOM not marked** — detection scans the `*.out` logs next to the run for
-  `oom_kill` / `Out of memory`; use `--killed` when the log is elsewhere.
+  `oom_kill` / `Out of memory`, and for the run's own `Exit code: 137` / `-9`
+  line (Slurm does not always write the `oom_kill` summary); use `--killed` when
+  the log is elsewhere.
 * **`taurex-mem-run` not found** — install the package into the environment the
   job activates, *before* the `taurex-mem-run` line, so `PATH` is set up by the
   time Slurm runs the job.

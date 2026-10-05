@@ -181,6 +181,7 @@ def compare_hdf5(path_a: Path, path_b: Path, rtol: float, atol: float):
     measured: list[DatasetDiff] = []
     failed: list[DatasetDiff] = []
     notes: list[str] = []
+    total = 0
 
     def datasets(handle) -> dict:
         found: dict = {}
@@ -189,24 +190,30 @@ def compare_hdf5(path_a: Path, path_b: Path, rtol: float, atol: float):
             if isinstance(obj, h5py.Dataset) else None)
         return found
 
-    with h5py.File(path_a, "r") as fa, h5py.File(path_b, "r") as fb:
-        in_a, in_b = datasets(fa), datasets(fb)
-        total = 0
-        for name in sorted(set(in_a) - set(in_b)):
-            notes.append(f"{name}: only in {path_a.name}")
-        for name in sorted(set(in_b) - set(in_a)):
-            notes.append(f"{name}: only in {path_b.name}")
-        for name in sorted(set(in_a) & set(in_b)):
-            if in_a[name].dtype != in_b[name].dtype:
-                notes.append(f"{name}: {in_a[name].dtype} vs {in_b[name].dtype}")
-            total += 1
-            diff = _dataset_diff(name, in_a[name][()], in_b[name][()], rtol, atol)
-            if diff is None:
-                continue
-            if diff.rel is not None:
-                measured.append(diff)
-            if not diff.same:
-                failed.append(diff)
+    # A run killed before it finished writing (an OOM kill, typically) leaves an
+    # incomplete HDF5 file behind, which h5py refuses to open; report that as a
+    # note instead of letting the whole comparison die on it.
+    try:
+        with h5py.File(path_a, "r") as fa, h5py.File(path_b, "r") as fb:
+            in_a, in_b = datasets(fa), datasets(fb)
+            for name in sorted(set(in_a) - set(in_b)):
+                notes.append(f"{name}: only in {path_a.name}")
+            for name in sorted(set(in_b) - set(in_a)):
+                notes.append(f"{name}: only in {path_b.name}")
+            for name in sorted(set(in_a) & set(in_b)):
+                if in_a[name].dtype != in_b[name].dtype:
+                    notes.append(f"{name}: {in_a[name].dtype} vs {in_b[name].dtype}")
+                total += 1
+                diff = _dataset_diff(name, in_a[name][()], in_b[name][()], rtol, atol)
+                if diff is None:
+                    continue
+                if diff.rel is not None:
+                    measured.append(diff)
+                if not diff.same:
+                    failed.append(diff)
+    except OSError as exc:
+        return 0, [], [], [f"unreadable HDF5 output ({path_a.name} vs "
+                           f"{path_b.name}): {exc}"]
 
     measured.sort(key=lambda d: d.rel, reverse=True)
     failed.sort(key=lambda d: (d.rel is None, -d.rel if d.rel is not None else 0.0))
@@ -293,9 +300,10 @@ def format_checks(checks: list[Check], baseline_label: str, rtol: float) -> str:
         problems = check.diffs + check.notes
         if check.kind == "hdf5":
             worst = "" if check.worst is None else f", largest {check.worst:.3g} relative"
+            count = (f"{len(problems)} of {check.total} datasets" if check.total
+                     else "unreadable output")
             head = (f"{check.label}: {check.path.name} - DIFFERENT from "
-                    f"{check.baseline.name} ({len(problems)} of {check.total} datasets"
-                    f"{worst})")
+                    f"{check.baseline.name} ({count}{worst})")
         else:
             head = (f"{check.label}: {check.path.name} - DIFFERENT from "
                     f"{check.baseline.name}")
@@ -321,8 +329,10 @@ def report_lines(checks: list[Check], rtol: float) -> list[str]:
         elif check.kind == "hdf5":
             count = len(check.diffs) + len(check.notes)
             worst = "" if check.worst is None else f", largest {check.worst:.3g} relative"
+            what = (f"{count} of {check.total} datasets" if check.total
+                    else "unreadable output")
             lines.append(f"| `{check.label}` | `{check.path.name}` | "
-                         f"**different** ({count} of {check.total} datasets{worst}) |")
+                         f"**different** ({what}{worst}) |")
         else:
             lines.append(f"| `{check.label}` | `{check.path.name}` | **different** |")
     for check in checks:

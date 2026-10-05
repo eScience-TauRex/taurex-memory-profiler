@@ -399,6 +399,11 @@ def format_duration(seconds: float | None) -> str:
 
 OOM_KEYWORDS = ("oom_kill", "oom-kill", "oom_reaper", "out of memory", "out-of-memory")
 
+# SIGKILL, which is what the OOM killer sends. Slurm's own "oom_kill events"
+# line is not always written, but the run logs its exit code either way
+# (137 = 128 + 9, and subprocess reports a signalled child as -9).
+OOM_EXIT_RE = re.compile(r"exit code:\s*(?:137|-9)\b")
+
 
 def candidate_logs(run: Run) -> list[Path]:
     """Slurm/job logs that belong to a run, newest last.
@@ -440,7 +445,7 @@ def detect_oom(run: Run) -> bool:
             text = out.read_text(errors="ignore").lower()
         except OSError:
             continue
-        if any(k in text for k in OOM_KEYWORDS):
+        if any(k in text for k in OOM_KEYWORDS) or OOM_EXIT_RE.search(text):
             return True
     return False
 

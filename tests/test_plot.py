@@ -262,6 +262,26 @@ def test_job_log_timing_and_report():
         assert "| 10.0 min |" in text and "peak total (GB)" in text
 
 
+def test_oom_from_exit_code():
+    """A SIGKILLed run is marked OOM even without a Slurm 'oom_kill' line."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        logs = tmp / "memory_logs"
+        write_unified(logs, job="12345", label="mem_64_oom")
+        (tmp / "slurm-12345.out").write_text(
+            "Job Finished: 2026-01-01T12:10:00+00:00\n"
+            "Exit code: 137   Runtime: 59 s\n")
+        out = run_plot("--logdir", logs, "--no-overview", "--no-total",
+                       "--output-dir", logs)
+        assert "OOM killed: yes" in out, out
+
+        # a clean exit is not marked
+        (tmp / "slurm-12345.out").write_text("Exit code: 0   Runtime: 59 s\n")
+        out = run_plot("--logdir", logs, "--no-overview", "--no-total",
+                       "--output-dir", logs)
+        assert "OOM killed: no" in out, out
+
+
 def test_sacct_fallback_and_compare():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -375,6 +395,20 @@ def test_output_check_same_and_different():
                        "--no-check-output", "--no-overview", "--no-total",
                        "--output-dir", logs)
         assert "Output check" not in out, out
+
+        # a run killed before it finished writing leaves a truncated HDF5 file:
+        # that is reported as a note, the comparison does not die on it
+        with h5py.File(tmp / "out_222.hdf5", "w") as handle:
+            handle["profile"] = np.linspace(0.0, 1.0, 50)
+        with (tmp / "out_222.hdf5").open("r+b") as handle:
+            handle.truncate(96)
+        proc = call([*PLOT, "--logdir", str(logs), "--compare",
+                     "mem_64_good", "mem_64_bad", "--no-overview", "--no-total",
+                     "--report", str(logs / "report.md"), "--output-dir", str(logs)])
+        assert proc.returncode == 0, proc.stderr
+        assert "unreadable output" in proc.stdout, proc.stdout
+        assert "out_111.hdf5 vs out_222.hdf5" in proc.stdout, proc.stdout
+        assert "unreadable output" in (logs / "report.md").read_text()
 
 
 def main():
