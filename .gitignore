@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+# tooling caches
+.pytest_cache/
+.ruff_cache/
+
+# editor settings
+.vscode/
+
+# sampler output (default -o / --logdir, see README)
+memory_logs/

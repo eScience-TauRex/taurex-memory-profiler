@@ -1,0 +1,199 @@
+#!/bin/bash
+# ============================================================
+# mem-run — run any command with the memory monitor beside it
+# ============================================================
+#
+# One line instead of the monitoring boilerplate:
+#
+#   mem-run [options] [--] COMMAND [ARGS...]
+#
+# so a normal job script changes in exactly one place:
+#
+#   -mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
+#   +mem-run -- mpirun -np 256 taurex -i parfile.par --retrieval -o output.hdf5 --light
+#
+# It starts one memory_monitor.sh per node (as an overlapping Slurm
+# step, or locally when not under Slurm), waits for the first samples,
+# runs the command, stops the monitors on every exit path, and prints
+# how to plot the result. The exit code of the command is returned
+# unchanged.
+#
+# Options:
+#   -o, --outdir DIR     where the CSVs go                [memory_logs]
+#   -i, --interval SEC   sampling interval                [$MEM_INTERVAL or 5]
+#   -p, --pattern REGEX  process names to track           [$MEM_PATTERN or .]
+#   -j, --jobid ID       job id used in the file names    [$SLURM_JOB_ID or local]
+#   -l, --label NAME     label for the plots              [job id]
+#       --pyspy          also record a py-spy CPU flamegraph
+#       --pyspy-rate HZ  py-spy sampling rate             [100]
+#       --pyspy-out F    py-spy output file               [profile_<label>.svg]
+#   -h, --help           this help
+#
+# Environment:
+#   MEM_MONITOR   path to memory_monitor.sh     [next to this script]
+#   MEM_RUN_WAIT  seconds to wait for the first samples [2*interval + 2]
+# ============================================================
+
+set -u
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MONITOR="${MEM_MONITOR:-${HERE}/memory_monitor.sh}"
+
+OUTDIR="memory_logs"
+INTERVAL="${MEM_INTERVAL:-5}"
+PATTERN="${MEM_PATTERN:-.}"
+JOBID="${SLURM_JOB_ID:-local}"
+LABEL=""
+PYSPY=0
+PYSPY_RATE="${PYSPY_RATE:-100}"
+PYSPY_OUT=""
+
+usage() {
+    sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+    exit "${1:-0}"
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o|--outdir)     OUTDIR="$2"; shift 2 ;;
+        -i|--interval)   INTERVAL="$2"; shift 2 ;;
+        -p|--pattern)    PATTERN="$2"; shift 2 ;;
+        -j|--jobid)      JOBID="$2"; shift 2 ;;
+        -l|--label)      LABEL="$2"; shift 2 ;;
+        --pyspy)         PYSPY=1; shift ;;
+        --pyspy-rate)    PYSPY_RATE="$2"; shift 2 ;;
+        --pyspy-out)     PYSPY_OUT="$2"; shift 2 ;;
+        -h|--help)       usage 0 ;;
+        --)              shift; break ;;
+        -*)              echo "mem-run: unknown option '$1' (use -- before the command)" >&2
+                         usage 1 ;;
+        *)               break ;;
+    esac
+done
+
+if [ $# -eq 0 ]; then
+    echo "mem-run: no command given" >&2
+    usage 1
+fi
+CMD=("$@")
+
+LABEL="${LABEL:-$JOBID}"
+PYSPY_OUT="${PYSPY_OUT:-profile_${LABEL}.svg}"
+OUTDIR="${OUTDIR%/}"
+STOP_FILE="${OUTDIR}/.stop_${JOBID}"
+
+if [ ! -f "$MONITOR" ]; then
+    echo "ERROR: memory_monitor.sh not found at $MONITOR" >&2
+    echo "       Set MEM_MONITOR or keep mem-run next to memory_monitor.sh." >&2
+    exit 1
+fi
+
+if [ "$PYSPY" -eq 1 ] && ! command -v py-spy >/dev/null 2>&1; then
+    echo "ERROR: --pyspy given but py-spy is not on PATH (pip install py-spy)" >&2
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# Start one monitor per node
+# ------------------------------------------------------------
+
+mkdir -p "$OUTDIR"
+rm -f "$STOP_FILE"
+
+echo "============================================================"
+echo "MEMORY MONITORED RUN"
+echo "============================================================"
+echo "Command  : ${CMD[*]}"
+echo "Job ID   : ${JOBID}   (label '${LABEL}')"
+echo "Nodes    : ${SLURM_NNODES:-1}"
+echo "Interval : ${INTERVAL} s   (pattern '${PATTERN}')"
+echo "Logs     : ${OUTDIR}"
+[ "$PYSPY" -eq 1 ] && echo "py-spy   : ${PYSPY_RATE} Hz -> ${PYSPY_OUT}"
+echo "============================================================"
+
+if [ -n "${SLURM_JOB_ID:-}" ]; then
+    # --overlap lets the monitoring step coexist with the job step
+    srun \
+        --nodes="${SLURM_NNODES:-1}" \
+        --ntasks="${SLURM_NNODES:-1}" \
+        --ntasks-per-node=1 \
+        --cpus-per-task=1 \
+        --overlap \
+        bash "$MONITOR" -o "$OUTDIR" -i "$INTERVAL" -p "$PATTERN" -j "$JOBID" &
+else
+    bash "$MONITOR" -o "$OUTDIR" -i "$INTERVAL" -p "$PATTERN" -j "$JOBID" &
+fi
+MONITOR_PID=$!
+
+stop_monitors() {
+    touch "$STOP_FILE" 2>/dev/null
+    for _ in $(seq 1 $((INTERVAL + 10))); do
+        kill -0 "$MONITOR_PID" 2>/dev/null || break
+        sleep 1
+    done
+    kill "$MONITOR_PID" 2>/dev/null || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+    rm -f "$STOP_FILE"
+}
+trap stop_monitors EXIT
+
+# Metadata read back by plot_memory.py (label, and where the job log is).
+SUBMIT_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+{
+    echo "label=${LABEL}"
+    echo "jobid=${JOBID}"
+    echo "nodes=${SLURM_NNODES:-1}"
+    echo "command=${CMD[*]}"
+    echo "interval=${INTERVAL}"
+    echo "pattern=${PATTERN}"
+    echo "pyspy=${PYSPY}"
+    echo "pyspy_out=${PYSPY_OUT}"
+    [ -n "${SLURM_JOB_NAME:-}" ] && echo "log=${SUBMIT_DIR}/slurm_${SLURM_JOB_NAME}_${JOBID}.out"
+    [ -n "${SLURM_JOB_NAME:-}" ] && echo "err=${SUBMIT_DIR}/slurm_${SLURM_JOB_NAME}_${JOBID}.err"
+    echo "start=$(date -Is)"
+} > "${OUTDIR}/run_${JOBID}.meta"
+
+# ------------------------------------------------------------
+# Wait for the first samples, so even a crash-on-startup run has data
+# ------------------------------------------------------------
+
+WAIT="${MEM_RUN_WAIT:-$((2 * INTERVAL + 2))}"
+if [ "$WAIT" -gt 0 ]; then
+    sleep "$WAIT"
+fi
+
+SAMPLED=0
+for F in "${OUTDIR}"/node_memory_"${JOBID}"_*.csv; do
+    [ -e "$F" ] || { echo "WARNING: no node memory log was created"; break; }
+    echo "$(basename "$F"): $(( $(wc -l < "$F") - 1 )) samples so far"
+    [ $(( $(wc -l < "$F") - 1 )) -ge 1 ] && SAMPLED=1
+done
+[ "$SAMPLED" -eq 1 ] || echo "WARNING: the sampler has no samples yet, continuing anyway"
+
+# ------------------------------------------------------------
+# Run the command
+# ------------------------------------------------------------
+
+START_EPOCH=$(date +%s)
+echo "Job Started: $(date -Is)"
+
+if [ "$PYSPY" -eq 1 ]; then
+    py-spy record --rate "$PYSPY_RATE" --subprocesses -o "$PYSPY_OUT" -- "${CMD[@]}"
+    STATUS=$?
+else
+    "${CMD[@]}"
+    STATUS=$?
+fi
+
+echo "Job Finished: $(date -Is)"
+echo "Exit code: ${STATUS}   Runtime: $(( $(date +%s) - START_EPOCH )) s"
+
+# The EXIT trap stops the monitors and removes the stop file.
+echo "============================================================"
+echo "Plot with:"
+echo "  python ${HERE}/plot_memory.py --logdir ${OUTDIR} --job ${JOBID} \\"
+echo "      --per-node --top 10 --report ${OUTDIR}/report_${JOBID}.md"
+[ "$PYSPY" -eq 1 ] && echo "  (CPU flamegraph: ${PYSPY_OUT})"
+echo "============================================================"
+
+exit "$STATUS"
