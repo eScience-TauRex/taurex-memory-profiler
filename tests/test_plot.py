@@ -29,7 +29,7 @@ def _fmt(t: dt.datetime) -> str:
 
 def write_unified(logdir: Path, job="12345", nodes=("n1", "n2"), ranks=4,
                   samples=15, interval=5, pss=True, label="good"):
-    """Write logs in the unified memory_monitor.sh format."""
+    """Write logs in the unified format of taurex_memory_profiler.monitor."""
     logdir.mkdir(parents=True, exist_ok=True)
     t0 = dt.datetime(2026, 1, 1, 12, 0, 0)
     proc_cols = ["timestamp", "node", "pid", "ppid", "command", "rss_kb", "pss_kb",
