@@ -122,7 +122,7 @@ def test_unified_overview():
         logs = Path(tmp) / "memory_logs"
         write_unified(logs)
         out = run_plot("--logdir", logs)
-        for name in ("memory_good.png", "memory_good.pdf", "memory_good_total.png"):
+        for name in ("memory_good.png", "memory_good_total.png"):
             assert (logs / name).is_file(), f"missing {name}\n{out}"
         assert "peak total Pss" in out
 
@@ -300,6 +300,26 @@ def test_select_picks_a_whole_grid():
         proc = call(cmd)
         assert proc.returncode != 0
         assert "matches" in proc.stderr
+
+
+def test_compare_by_run_name():
+    """Two runs in one directory are compared by name, no job ids needed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        logs = Path(tmp) / "memory_logs"
+        write_unified(logs, job="111", label="mem_64_good")
+        write_unified(logs, job="222", label="mem_64_bad")
+
+        # the two names at once, and as the first / second run
+        out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad")
+        assert (logs / "compare_mem_64_good_vs_mem_64_bad.png").is_file(), out
+
+        out = run_plot("mem_64_good", "--compare", "mem_64_bad", "--logdir", logs)
+        assert (logs / "compare_mem_64_good_vs_mem_64_bad.png").is_file(), out
+
+        # a name that is neither a file nor a known run fails clearly
+        proc = call([*PLOT, "--logdir", str(logs), "--compare", "mem_64_nope"])
+        assert proc.returncode != 0
+        assert "mem_64_nope" in proc.stderr and "available" in proc.stderr
 
 
 def main():

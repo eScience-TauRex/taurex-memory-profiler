@@ -28,10 +28,13 @@ taurex-mem-plot mem_64.csv
 taurex-mem-plot mem_64.csv --compare mem_64_bad.csv \
     --label-a "OOM branch" --label-b "original taurex3" --title "2 nodes 64 tasks"
 
+# compare two runs by name, straight out of the log directory
+taurex-mem-plot --compare mem_64_good mem_64_bad
+
 # several unified log directories, labelled
 taurex-mem-plot good=logs_good --compare bad=logs_bad --compare2 f32=logs_f32
 
-# two jobs that live in the same log directory (the grid use case)
+# two jobs that live in the same log directory, picked by job id
 taurex-mem-plot mem_64_good=memory_logs#12345 \
     --compare mem_64_bad=memory_logs#12346
 """
@@ -634,7 +637,6 @@ def reference_line(ax, y, text, color, dashes):
 
 def save_fig(fig, base: Path):
     fig.savefig(f"{base}.png", dpi=150)
-    fig.savefig(f"{base}.pdf")
     plt.close(fig)
     print(f"Saved {base}.png")
 
@@ -1032,14 +1034,18 @@ def write_report(runs: list[Run], path: Path, limit_gb: float, project_ranks: in
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("runs", nargs="*",
-                        help="log files or directories, optionally as LABEL=path[#jobid]")
-    parser.add_argument("--compare", action="append", default=None, metavar="[LABEL=]PATH[#JOB]",
-                        help="extra run to overlay (repeatable)")
-    parser.add_argument("--compare2", default=None, metavar="[LABEL=]PATH[#JOB]",
+    parser.add_argument("runs", nargs="*", metavar="RUN",
+                        help="a run to plot: a run name (label), a log file, a log "
+                             "directory or LABEL=path[#jobid]")
+    parser.add_argument("--compare", action="append", nargs="+", default=None, metavar="RUN",
+                        help="run to overlay, given the same way as RUN; several may "
+                             "follow at once and the option may be repeated; each run "
+                             "is plotted on its own first")
+    parser.add_argument("--compare2", default=None, metavar="RUN",
                         help="third run to overlay (legacy alias)")
     parser.add_argument("--logdir", default="memory_logs",
-                        help="directory scanned when no run is given [memory_logs]")
+                        help="directory holding the runs, scanned when a run is given "
+                             "as a name and when no run is given [memory_logs]")
     parser.add_argument("--job", default=None,
                         help="Slurm job id inside the log directory (default: latest found)")
     parser.add_argument("--select", default=None, metavar="GLOB",
@@ -1061,7 +1067,8 @@ def parse_args(argv=None):
     parser.add_argument("--per-node", action="store_true", help="also draw one line per node")
     parser.add_argument("--top", type=int, default=0, help="also draw the top-N processes by peak memory")
     parser.add_argument("--per-run", action="store_true",
-                        help="with several runs, also draw the per-run overview and total figures")
+                        help="with several runs, also draw the per-run overview and total "
+                             "figures (already implied by --compare)")
     parser.add_argument("--no-overview", action="store_true", help="skip the overview figure")
     parser.add_argument("--no-total", action="store_true", help="skip the total figure")
     parser.add_argument("--title", default=None, help="custom title for the comparison figure")
@@ -1089,10 +1096,15 @@ def split_spec(spec: str):
     return label, Path(path).expanduser(), job
 
 
+def is_run_name(path: Path) -> bool:
+    """True for a bare name such as 'mem_64_good', i.e. a run label."""
+    return path.parent == Path(".") and path.name not in ("", ".", "..")
+
+
 def collect_specs(args):
     raw = [(None, s) for s in args.runs]
     if args.compare:
-        raw += [(None, s) for s in args.compare]
+        raw += [(None, s) for group in args.compare for s in group]
     if args.compare2:
         raw.append((None, args.compare2))
     if not raw:
@@ -1122,17 +1134,28 @@ def main(argv=None):
     specs, job = collect_specs(args)
 
     runs: list[Run] = []
+    logdir = Path(args.logdir).expanduser()
     for label, path, spec_job in specs:
-        if not path.exists():
+        if path.exists():
+            # --select applies to the directory the run spec points at.
+            select = args.select if path.is_dir() else None
+            built = build_runs(path, spec_job if spec_job is not None else job, select=select)
+            if not built:
+                sys.exit(f"ERROR: no memory logs found in {path}")
+            if label and not select:
+                for run in built:
+                    run.label = label
+        elif is_run_name(path):
+            # A bare name is a run label inside --logdir, so runs are compared
+            # by name without needing their job ids.
+            built = build_runs(logdir, spec_job, select=str(path))
+            if not built:
+                sys.exit(f"ERROR: no run named '{path}' in {logdir}")
+            if label:
+                for run in built:
+                    run.label = label
+        else:
             sys.exit(f"ERROR: {path} not found")
-        # --select applies to the directory the run spec points at.
-        select = args.select if path.is_dir() else None
-        built = build_runs(path, spec_job if spec_job is not None else job, select=select)
-        if not built:
-            sys.exit(f"ERROR: no memory logs found in {path}")
-        if label and not select:
-            for run in built:
-                run.label = label
         runs += built
 
     if not runs:
@@ -1162,13 +1185,9 @@ def main(argv=None):
     for run in runs:
         print_summary(run, args.limit_gb, args.project_ranks)
 
-    if len(runs) > 1:
-        base = out_root / ("compare_" + "_vs_".join(safe(r.label) for r in runs))
-        plot_compare(runs, base, args.limit_gb, title=args.title)
-    elif not has_series(runs[0]):
-        plot_peaks(runs, out_root / f"memory_{safe(runs[0].label)}_peak")
-
-    make_single = len(runs) == 1 or args.per_run
+    # --compare also draws each run on its own, so the runs are readable one by
+    # one before they are overlaid.
+    make_single = len(runs) == 1 or args.per_run or bool(args.compare or args.compare2)
     for run in runs:
         stem = out_root / f"memory_{safe(run.label)}"
         if make_single and not args.no_overview:
@@ -1179,6 +1198,12 @@ def main(argv=None):
             plot_per_node(run, stem.with_name(stem.name + "_per_node"))
         if args.top > 0:
             plot_top(run, args.top, stem.with_name(stem.name + f"_top{args.top}"))
+
+    if len(runs) > 1:
+        base = out_root / ("compare_" + "_vs_".join(safe(r.label) for r in runs))
+        plot_compare(runs, base, args.limit_gb, title=args.title)
+    elif not has_series(runs[0]):
+        plot_peaks(runs, out_root / f"memory_{safe(runs[0].label)}_peak")
 
     if args.report:
         report_path = Path(args.report)

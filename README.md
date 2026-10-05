@@ -58,10 +58,13 @@ taurex-mem-run -l mem_64_good -- mpirun -np 256 taurex -i parfile.par --retrieva
 # 2. plot the latest run in ./memory_logs
 taurex-mem-plot
 
-# 3. compare a group of runs (see "Working with a grid of runs")
-taurex-mem-plot --logdir memory_logs --select 'mem_64_*' \
-    --report memory_logs/report_64.md
+# 3. compare two runs by name, straight out of ./memory_logs
+taurex-mem-plot --compare mem_64_good mem_64_bad
 ```
+
+The runs are found by the `-l` label you gave them, so no job id and no path are
+needed. Add as many names as you like (`--compare a b c`), and `--report` to also
+get the tables.
 
 ---
 
@@ -146,23 +149,34 @@ taurex-mem-plot [RUN ...] [options]     # or: python -m taurex_memory_profiler
 | you have | command |
 |---|---|
 | one log directory, most recent run | `taurex-mem-plot` |
-| several jobs in one directory | `--job 12345` for one, `--select 'mem_64_*'` for all matching |
+| two (or more) runs by name in one directory | `taurex-mem-plot --compare mem_64_good mem_64_bad` |
+| several runs picked by pattern | `--select 'mem_64_*'` |
+| one specific job in a directory | `--job 12345` |
 | one directory per run | `good=logs_good --compare bad=logs_bad` |
 | individual CSVs | `mem_64.csv --compare mem_64_bad.csv` |
 | only an `sacct` dump | `sacct_26968927.txt` |
 
-A `RUN` is a CSV file, a directory of logs, or `LABEL=path[#jobid]`. `--select`
-matches the run label (from `run_<jobid>.meta`) or the job id, and picks up every
-match, so a whole grid in one directory plots in one command. With no `RUN` the
-tool scans `--logdir` (default `memory_logs`) and uses the most recent job unless
-`--job` or `--select` is given. Labels default to the `.meta` label, so name your
-runs with `-l` when you submit them.
+A `RUN` is one of:
+
+| form | example | meaning |
+|---|---|---|
+| name | `mem_64_good` | the run labelled `mem_64_good` in `--logdir` |
+| file | `mem_64.csv` | one CSV, or an `sacct` dump |
+| directory | `logs_good` | most recent run there (or `--job`/`--select`) |
+| `LABEL=path[#jobid]` | `good=logs#12345` | explicit path and job, shown as `good` |
+
+A **name** is matched against the `label=` in `run_<jobid>.meta`, which is what
+`taurex-mem-run -l` writes, so the name you submitted the job with is the name
+you plot it with. `--select GLOB` does the same but keeps every match, so
+`--select 'mem_64_*'` overlays a whole row of a grid in one command. With no
+`RUN` the tool scans `--logdir` (default `memory_logs`) and uses the most recent
+job unless `--job` or `--select` is given.
 
 ### Options
 
 | option | meaning |
 |---|---|
-| `--compare RUN` | overlay another run (repeatable, any number) |
+| `--compare RUN` | overlay another run, by name or path (repeatable, several at once) |
 | `--compare2 RUN` | third run (shorthand) |
 | `--label NAME`, `--label-a/-b/-c NAME` | labels for the runs |
 | `--job ID` | one job inside a log directory |
@@ -174,7 +188,7 @@ runs with `-l` when you submit them.
 | `--project-ranks N` | ranks/node for the memory extrapolation [128] |
 | `--per-node` | also draw one line per node |
 | `--top N` | also draw the top-N processes by peak memory |
-| `--per-run` | with several runs, also write the per-run figures |
+| `--per-run` | with several runs, also write the per-run figures (implied by `--compare`) |
 | `--report PATH` | also write a markdown report (peaks, limits, timings) |
 | `--title TEXT` | custom title for the comparison figure |
 | `--output-dir DIR` | where to write the figures |
@@ -182,7 +196,7 @@ runs with `-l` when you submit them.
 
 ### What you get
 
-Figures (PNG + PDF) are written next to the logs, in the current directory when
+Figures (PNG) are written next to the logs, in the current directory when
 the runs come from several directories, or wherever `--output-dir` points:
 
 * `memory_<label>.png` — overview: node memory used vs the physical memory, the
@@ -193,6 +207,11 @@ the runs come from several directories, or wherever `--output-dir` points:
 * `memory_<label>_peak.png` — bar chart of the peak, for runs that only have an
   `sacct` dump.
 * `memory_<label>_per_node.png`, `memory_<label>_top<N>.png` — optional breakdowns.
+
+With `--compare`, every compared run gets its own `memory_<label>.png` and
+`memory_<label>_total.png` first, so each run can be read on its own and the
+`compare_*.png` overlay is written last. `--per-run` does the same for several
+runs that were not given with `--compare`.
 
 The text summary and the report give the peak total, the peak per node (next to
 the `--mem` limit), the per-rank statistics with the extrapolation to
@@ -207,7 +226,7 @@ job id), use the Slurm accounting:
 
 ```bash
 sacct -j 26968927 -P --format=JobID,Elapsed,MaxRSS,MaxVMSize,AveRSS > sacct_26968927.txt
-taurex-mem-plot sacct_26968927.txt --compare mem_64_good=memory_logs#12345
+taurex-mem-plot sacct_26968927.txt --compare mem_64_good
 ```
 
 The dump is detected by its `MaxRSS` column; it contributes a peak to the
@@ -216,43 +235,75 @@ which is what `sacct` reports.
 
 ---
 
-## Working with a grid of runs
+## Comparing runs
 
-The point of a grid is to compare the same retrieval under different conditions:
-node layout (32/64/128 ranks per node), code variant (`good`/`bad`/`float32`), or
-environment (taurex vs taurex4-pytorch vs jax). Whatever the axis, the workflow
-is the same: one job per cell with a distinct label, then plot by label.
+Comparing is two steps: give each run a name, then plot the names together.
 
-### 1. Label every run
+### 1. Name the run
 
-Submit one job per cell, passing a distinct `-l mem_<config>_<variant>`
-(`mem_64_good`, `mem_128_float32`, …), and let every run write to the same
-`-o`/`--logdir` (default `memory_logs`) so they land together. That label ends up
-in `run_<jobid>.meta` and in the figure names, which is exactly what makes
-`--select` work later. A grid that varies the node layout is just the same job
-script submitted with different `--nodes`/`--ntasks-per-node` and `-l`.
-
-### 2. Plot the grid
-
-One run per configuration (`--select 'mem_64_*'`) gives the comparison figure.
-Measuring across the whole grid at once, the report lines up every run, so the
-peaks and timings can be read across the grid in one table:
+Pass `-l NAME` to `taurex-mem-run`, and let every run write to the same output
+directory (default `memory_logs`):
 
 ```bash
-taurex-mem-plot --logdir memory_logs --select 'mem_*' \
-    --report memory_logs/report_grid.md
+taurex-mem-run -l mem_64_good -- mpirun -np 128 taurex -i parfile.par --retrieval -o output.hdf5 --light
 ```
 
-Or one report per axis value, e.g. for a scaling study:
+The name is stored in `run_<jobid>.meta` next to the CSVs, so it survives long
+after you have forgotten the job id.
+
+### 2. Plot the names
+
+```bash
+# compare two runs that both live in ./memory_logs
+taurex-mem-plot --compare mem_64_good mem_64_bad
+
+# keep the tables too
+taurex-mem-plot --compare mem_64_good mem_64_bad \
+    --report memory_logs/report_good_vs_bad.md
+```
+
+That is the whole interface: `--compare` takes run names, as many as you like,
+and each one is looked up in `--logdir`. Use `LABEL=PATH` instead of a name when
+the run lives somewhere else, e.g. `--compare bad=logs_bad` or
+`--compare bad=logs_bad#12345` (a third run goes under `--compare2`, or just list
+it in the same `--compare`). The first run can be a name too:
+
+```bash
+taurex-mem-plot mem_64_good --compare mem_64_bad
+```
+
+Labels on the figures default to the run names, so the plot is readable without
+renaming anything afterwards. Each compared run is plotted on its own first
+(`memory_<name>.png` and `memory_<name>_total.png`), and the `compare_*.png`
+overlay is written last.
+
+### Picking runs by pattern
+
+If you name the runs of a grid after their axes — `mem_64_good`, `mem_64_bad`,
+`mem_128_good` — you can select a whole row with a glob, instead of listing the
+names:
+
+```bash
+# every run whose name starts with mem_64_
+taurex-mem-plot --select 'mem_64_*'
+
+# the whole grid in one table
+taurex-mem-plot --select 'mem_*' --report memory_logs/report_grid.md
+```
+
+`--select` accepts names and job ids, and combines with `--logdir`. A grid that
+varies the node layout is just the same job script submitted with different
+`--nodes`/`--ntasks-per-node` and `-l`. One report per axis value, e.g. for a
+scaling study:
 
 ```bash
 for cfg in 32 64 128; do
-    taurex-mem-plot --logdir memory_logs --select "mem_${cfg}_*" \
+    taurex-mem-plot --select "mem_${cfg}_*" \
         --title "${cfg} ranks/node" --report "memory_logs/report_${cfg}.md"
 done
 ```
 
-### 3. Read the comparison
+### Read the comparison
 
 * **Peak per node against `--mem`** is the headline: it tells you whether the run
   fits and how much headroom is left. The cgroup line is what the OOM killer
@@ -266,9 +317,9 @@ done
 * **The report** puts memory and timing side by side, which is what you need to
   choose between environments — a run is only better if it is not slower.
 
-### 4. Share it
+### Share it
 
-The `--report` markdown plus the PNG/PDF figures are self-contained: they list
+The `--report` markdown plus the PNG figures are self-contained: they list
 the runs, the peaks against the limit, the relative differences, the timings and
 the per-node table. Copy them next to the logs, or commit them with the results.
 
