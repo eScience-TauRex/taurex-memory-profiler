@@ -204,6 +204,7 @@ job unless `--job` or `--select` is given.
 | `--title TEXT` | custom title for the comparison figure |
 | `--check-output [LABEL=]FILE` | override which output file is compared (automatic: the `-o` of each run) |
 | `--no-check-output` | skip that check |
+| `--no-retrieval-plots` | do not run the TauREx plotter on the outputs; draw the values instead |
 | `--output-rtol`, `--output-atol` | tolerances of the output check [1e-06, 0] |
 | `--output-dir DIR` | where to write the figures |
 | `--killed` / `--not-killed` | force the OOM marker instead of auto-detecting it |
@@ -233,10 +234,10 @@ per-rank smallest/average/largest underneath.*
 limit.*
 
 ![output check](docs/output-check.png)
-*`outputs_<baseline>_vs_<label>.png` — did the compared runs produce the same
-result: the split of the datasets (roster on top), then the quantities
-themselves overlaid from both runs — SED, pressure profile, chemistry ratio —
-with the scalar parameters on a parity panel, and the verdict in the corner.*
+*`outputs_<baseline>_vs_<label>.png` — the TauREx plotter output of the two runs
+side by side (posteriors, profiles, contributions, spectrum), so the retrievals
+are compared the way they are read; when the plotter cannot read the output the
+tool reads the HDF5 itself and overlays the values.*
 
 With `--compare`, every compared run gets its own `memory_<label>.png` and
 `memory_<label>_total.png` first, so each run can be read on its own and the
@@ -380,17 +381,27 @@ comparison. Use `--no-check-output` to skip the check, and `--report` to get the
 same table in the markdown.
 
 When the two outputs are comparable the check draws
-`outputs_<baseline>_vs_<label>.png`, which compares the runs **by value**: a thin
-roster bar says how the datasets split (identical / within the tolerance /
-outside it / structural), and the body is the data itself, one panel per dataset
-that carries values:
+`outputs_<baseline>_vs_<label>.png`, and it is the **TauREx plotter that draws
+it**: for each run the tool runs
 
-* arrays — a pressure profile, an SED, a spectrum, a posterior — are overlaid
-  from both runs, so the shapes and the actual differences are readable, and
-  each panel carries its `max|Δ|` (or says the two lengths differ);
-* the scalar parameters share a parity panel: a point on the dashed diagonal
-  means the two runs agree on that parameter, an off-diagonal point is a
-  parameter that moved.
+```
+taurex-plot -i <output> -o retrieval_<label>/ --all
+```
+
+and the figure puts the same TauREx plot of the two runs side by side — posteriors,
+molecular and condensate profiles, temperature profile, contributions, spectrum —
+so the two retrievals are compared the way they are actually read. The plotter
+figures are kept in `retrieval_<label>/` and reused, so it runs once per output.
+`--no-retrieval-plots` turns this off.
+
+`--all` needs the forward `Output` group, which a `--light` run does not write;
+the tool then tries each plot on its own and keeps whatever can be drawn, and if
+nothing can be drawn it says so and falls back to reading the HDF5 itself: a thin
+roster bar (identical / within the tolerance / outside it / structural) over one
+panel per dataset that carries values — arrays such as the pressure profile or
+the SED overlaid from both runs with their `max|Δ|` (or their two lengths), and
+the scalar parameters on a parity panel where a point on the dashed diagonal
+means the two runs agree.
 
 Differences with no numeric value — a shape or dtype change — cannot be drawn,
 so they are named in the caption and counted in the verdict. A truncated or

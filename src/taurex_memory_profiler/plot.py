@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 from fnmatch import fnmatch
 import re
+import subprocess
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -887,6 +888,136 @@ def fmt_value(value: float) -> str:
     return f"{value:.4g}" if np.isfinite(value) else "inf"
 
 
+# The TauREx plotter is the tool that actually draws a retrieval, so the
+# comparison of two runs is made of *its* plots rather than of our own reading
+# of the HDF5. `-a` draws everything, but an output written with `--light` has no
+# forward `Output` group and the plotter aborts, so the flags are also tried one
+# by one and whatever they manage to draw is kept.
+# One process tries the flags in turn, so the (slow) taurex import is paid once,
+# and every failure is echoed so a plot that could not be drawn is visible.
+RETRIEVAL_PLOTTER = """
+import sys
+from pathlib import Path
+from taurex.plot.plotter import main
+input_file, outdir = sys.argv[1], sys.argv[2]
+attempts = [["--all"]] + [[flag] for flag in ("-P", "-x", "-D", "-t", "-c", "-s", "-d")]
+for extra in attempts:
+    sys.argv = ["taurex-plot", "-i", input_file, "-o", outdir, *extra]
+    try:
+        main()
+    except SystemExit as exc:
+        if exc.code not in (0, None):
+            print(f"{' '.join(extra)}: exit {exc.code}", file=sys.stderr)
+    except Exception as exc:
+        print(f"{' '.join(extra)}: {type(exc).__name__}: {exc}", file=sys.stderr)
+    if list(Path(outdir).glob("*.png")):
+        break
+"""
+
+
+def looks_like_retrieval(path: Path) -> bool:
+    """True for a TauREx retrieval output, which is what the plotter reads.
+
+    Checked before shelling out so a plain HDF5 (or a text file) never pays for
+    importing TauREx twice over.
+    """
+    try:
+        import h5py
+    except ImportError:
+        return False
+    try:
+        with h5py.File(path, "r") as handle:
+            return "ModelParameters" in handle or "Output" in handle
+    except OSError:
+        return False
+
+
+def taurex_plot_command(input_file: Path, outdir: Path) -> list[str]:
+    """The TauREx plotter, run with our own interpreter (same virtualenv)."""
+    return [sys.executable, "-c", RETRIEVAL_PLOTTER, str(input_file), str(outdir)]
+
+
+def produce_retrieval_plots(input_file: Path, outdir: Path) -> list[Path]:
+    """Draw a retrieval with the TauREx plotter; return the figures it wrote.
+
+    `--all` is tried first, then each flag on its own: an output written with
+    `--light` has no forward `Output` group, so parts of the plotter abort and
+    whatever it still manages to draw is kept. The directory is reused, so the
+    plotter runs once per output.
+    """
+    if not looks_like_retrieval(input_file):
+        return []
+    outdir.mkdir(parents=True, exist_ok=True)
+    figures = sorted(outdir.glob("*.png"))
+    if figures:
+        return figures
+    try:
+        proc = subprocess.run(taurex_plot_command(input_file, outdir),
+                              capture_output=True, text=True, check=False)
+    except OSError as exc:
+        print(f"  TauREx plotter could not be started: {exc}")
+        return []
+    figures = sorted(outdir.glob("*.png"))
+    if not figures:
+        detail = proc.stderr.strip().splitlines()
+        print(f"  TauREx plotter drew nothing for {input_file.name}"
+              + (f": {detail[-1]}" if detail else ""))
+    return figures
+
+
+def plot_retrieval_comparison(pages, base: Path, labels, max_rows: int = 6):
+    """Side-by-side comparison of the TauREx plots of two runs.
+
+    `pages` is a list of ``(name, figure_from_the_baseline, figure_from_other)``
+    and `labels` the two run labels; each row shows the same TauREx plot for both
+    runs, which is what makes the two retrievals comparable at a glance.
+    """
+    pages = pages[:max_rows]
+    rows = len(pages)
+    fig, axes = plt.subplots(rows, 2, figsize=(13, 3.6 * rows), squeeze=False)
+    fig.patch.set_facecolor("#fcfcfb")
+    for row, (name, path_a, path_b) in enumerate(pages):
+        for column, path in enumerate((path_a, path_b)):
+            ax = axes[row][column]
+            ax.imshow(plt.imread(path))
+            ax.set_xticks([])
+            ax.set_yticks([])
+            ax.grid(False)
+            for side in ("top", "right", "left", "bottom"):
+                ax.spines[side].set_visible(False)
+            if row == 0:
+                ax.set_title(labels[column], color=INK, fontsize=11)
+        axes[row][0].annotate(name, (0, 0.5), xycoords="axes fraction",
+                              xytext=(-8, 0), textcoords="offset points",
+                              ha="right", va="center", fontsize=9, color=INK2,
+                              rotation=90)
+    fig.suptitle(f"TauREx retrieval plots: {labels[0]} vs {labels[1]}",
+                 color=INK, fontsize=12, x=0.01, ha="left")
+    fig.tight_layout(rect=(0.02, 0, 1, 0.98))
+    save_fig(fig, base)
+
+
+def compare_retrieval_plots(check, out_root: Path, base_label: str,
+                            name: str) -> bool:
+    """Build the outputs figure from the TauREx plotter. False if unavailable."""
+    if check.path is None or check.baseline is None:
+        return False
+    figures = {}
+    for label, path in ((base_label, check.baseline), (check.label, check.path)):
+        figures[label] = {p.name: p
+                          for p in produce_retrieval_plots(
+                              path, out_root / f"retrieval_{safe(label)}")}
+    common = sorted(set(figures[base_label]) & set(figures[check.label]))
+    if not common:
+        return False
+    pages = [(name_, figures[base_label][name_], figures[check.label][name_])
+             for name_ in common]
+    print(f"  TauREx plotter: comparing {len(common)} figures "
+          f"({', '.join(sorted(figures[base_label]))})")
+    plot_retrieval_comparison(pages, out_root / name, (base_label, check.label))
+    return True
+
+
 def _numeric_datasets(path_a: Path, path_b: Path, max_arrays: int = 6):
     """Read the numeric datasets of two outputs, biggest arrays first.
 
@@ -1306,6 +1437,9 @@ def parse_args(argv=None):
                              "(the check is automatic: it uses the -o recorded in "
                              "run_<jobid>.meta, and compares HDF5 dataset by dataset "
                              "or anything else byte by byte)")
+    parser.add_argument("--no-retrieval-plots", action="store_true",
+                        help="do not run the TauREx plotter on the outputs; draw "
+                             "the values instead")
     parser.add_argument("--no-check-output", action="store_true",
                         help="do not compare the outputs of the compared runs")
     parser.add_argument("--output-rtol", type=float, default=1e-6,
@@ -1440,11 +1574,15 @@ def main(argv=None):
         for check in checks:
             # a truncated or unreadable output has nothing to draw: it is only
             # reported in the text, there is no comparison to make
-            if check.datasets:
-                plot_output_check(
-                    check,
-                    out_root / f"outputs_{safe(runs[0].label)}_vs_{safe(check.label)}",
-                    args.output_rtol, runs[0].label)
+            if not check.datasets:
+                continue
+            stem = out_root / f"outputs_{safe(runs[0].label)}_vs_{safe(check.label)}"
+            # the comparison the retrieval is actually read with: the plots the
+            # TauREx plotter makes of both outputs, side by side
+            if not args.no_retrieval_plots and compare_retrieval_plots(
+                    check, out_root, runs[0].label, stem.name):
+                continue
+            plot_output_check(check, stem, args.output_rtol, runs[0].label)
 
     # --compare also draws each run on its own, so the runs are readable one by
     # one before they are overlaid.

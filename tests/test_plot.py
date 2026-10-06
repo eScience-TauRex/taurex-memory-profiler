@@ -495,6 +495,59 @@ def test_output_check_figure_shows_the_values():
         plt.close(fig)
 
 
+def test_retrieval_plot_comparison():
+    """The outputs figure is built from the TauREx plotter's own figures."""
+    try:
+        import matplotlib
+        import numpy as np
+    except ImportError:
+        print("SKIP test_retrieval_plot_comparison (no matplotlib)")
+        return
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    sys.path.insert(0, str(SRC))
+    from taurex_memory_profiler import plot as plotmod
+    from taurex_memory_profiler.outputs import Check, DatasetDiff
+
+    saved_fig, saved_produce = plotmod.save_fig, plotmod.produce_retrieval_plots
+    captured: list = []
+    plotmod.save_fig = lambda fig, base: captured.append((fig, base))
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            plots = {}
+            for stem, slope in (("baseline", 1.0), ("other", 1.4)):
+                (tmp / f"{stem}.hdf5").write_bytes(b"")
+                directory = tmp / f"rp_{stem}"
+                directory.mkdir()
+                for name in ("spectrum.png", "temperature.png"):
+                    fig, ax = plt.subplots(figsize=(2, 1))
+                    ax.plot([0, 1], [0, slope])
+                    fig.savefig(directory / name, dpi=50)
+                    plt.close(fig)
+                plots[stem] = directory
+            plotmod.produce_retrieval_plots = \
+                lambda path, outdir: sorted(plots[path.stem].glob("*.png"))
+
+            check = Check(label="other", path=tmp / "other.hdf5",
+                          baseline=tmp / "baseline.hdf5", kind="hdf5", total=3,
+                          datasets=[DatasetDiff(name="x", rel=0.0, same=True)],
+                          same=True)
+            assert plotmod.compare_retrieval_plots(check, tmp, "baseline", "out")
+            fig, base = captured[-1]
+            assert base.name == "out", base        # save_fig appends .png itself
+            assert len(fig.axes) == 4, "2 TauREx figures x 2 runs"
+            assert [ax.get_title() for ax in fig.axes[0:2]] == ["baseline", "other"]
+
+            # nothing in common (or no figures at all) -> fall back, do not claim
+            plotmod.produce_retrieval_plots = lambda path, outdir: []
+            assert not plotmod.compare_retrieval_plots(check, tmp, "baseline", "out2")
+    finally:
+        plotmod.save_fig, plotmod.produce_retrieval_plots = saved_fig, saved_produce
+        plt.close("all")
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:
