@@ -16,7 +16,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _helpers import MONITOR, env  # noqa: E402  (needs the path tweak above)
+from _helpers import MONITOR, SRC, env  # noqa: E402  (needs the path tweak above)
+
+sys.path.insert(0, str(SRC))
+from taurex_memory_profiler.monitor import _job_cgroup_dir  # noqa: E402
 
 NODE_COLUMNS = ["timestamp", "node", "mem_total_kb", "mem_available_kb", "mem_used_kb",
                 "mem_used_percent", "cgroup_mem_kb", "swap_used_kb", "shmem_kb", "load1",
@@ -29,10 +32,10 @@ PROCESS_COLUMNS = ["timestamp", "node", "pid", "ppid", "command", "rss_kb", "pss
 LINUX = sys.platform == "linux"  # the sampler reads /proc
 
 
-def start_monitor(logdir: Path, jobid="7777", interval="0.2", pattern="."):
+def start_monitor(logdir: Path, jobid="7777", interval="0.2", pattern=".", threads="1"):
     return subprocess.Popen(
         [str(part) for part in MONITOR + ["-o", str(logdir), "-i", interval,
-                                          "-p", pattern, "-j", jobid]],
+                                          "-t", threads, "-p", pattern, "-j", jobid]],
         env=env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
 
@@ -83,6 +86,48 @@ def test_stop_file_stops_the_sampler():
         assert float(node_rows[-1]["elapsed_s"]) > float(node_rows[0]["elapsed_s"])
         assert all(int(row["mem_total_kb"]) > 0 for row in node_rows)
         assert all(int(row["rss_kb"]) > 0 for row in process_rows)
+
+
+def test_job_cgroup_dir_resolves_both_slurm_layouts():
+    """The sampler must read the job counter, not the counter of its own task."""
+    systemd = ("/sys/fs/cgroup/system.slice/slurmstepd.scope/s8FXM48CHGS100"
+               "/step_0/user/task_3")
+    assert _job_cgroup_dir(systemd, "27654944") == \
+        "/sys/fs/cgroup/system.slice/slurmstepd.scope/s8FXM48CHGS100"
+
+    legacy = "/sys/fs/cgroup/memory/slurm/uid_1/job_27654944/step_0/task_3"
+    assert _job_cgroup_dir(legacy, "27654944") == \
+        "/sys/fs/cgroup/memory/slurm/uid_1/job_27654944"
+
+    # an unknown layout is left untouched rather than trimmed to something wrong
+    other = "/sys/fs/cgroup/system.slice/slurmd.service"
+    assert _job_cgroup_dir(other, "27654944") == other
+
+
+def test_threads_keep_the_csvs_consistent():
+    """-t reads Pss from parallel threads without changing what is logged."""
+    if not LINUX:
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        logdir = Path(tmp) / "memory_logs"
+        monitor = start_monitor(logdir, jobid="9999", threads="4")
+        node_log = wait_for_file(logdir, "node_memory_9999_*.csv")
+        process_log = wait_for_file(logdir, "memory_9999_*.csv")
+
+        (logdir / ".stop_9999").touch()
+        out, err = monitor.communicate(timeout=20)
+        assert monitor.returncode == 0, out + err
+
+        node_rows = read_csv(node_log)
+        process_rows = read_csv(process_log)
+        assert list(node_rows[0]) == NODE_COLUMNS
+        assert list(process_rows[0]) == PROCESS_COLUMNS
+        for row in node_rows:
+            same_sample = [p for p in process_rows if p["timestamp"] == row["timestamp"]]
+            assert int(row["user_rss_kb"]) == sum(int(p["rss_kb"]) for p in same_sample)
+            assert int(row["user_pss_kb"]) == sum(int(p["pss_kb"]) for p in same_sample)
+        assert "Pss threads: 4" in out
 
 
 def test_pattern_filter_and_sigterm():

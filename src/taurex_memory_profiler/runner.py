@@ -20,6 +20,7 @@ reports a failed or killed retrieval as such.
 Options:
   -o, --outdir DIR     where the CSVs go                        [memory_logs]
   -i, --interval SEC   sampling interval                        [$MEM_INTERVAL or 5]
+  -t, --threads N      parallel Pss readers (also the monitor step's CPUs) [1]
   -p, --pattern REGEX  process names to track                   [$MEM_PATTERN or .]
   -j, --jobid ID       job id used in the file names            [$SLURM_JOB_ID or local]
   -l, --label NAME     label for the plots                      [job id]
@@ -29,8 +30,13 @@ Options:
 
 Environment:
   MEM_INTERVAL  default sampling interval
+  MEM_THREADS   default number of parallel Pss readers
   MEM_PATTERN   default process pattern
   MEM_RUN_WAIT  seconds to wait for the first samples [2*interval + 2]
+
+Reading Pss (a per-rank page-table walk) is what limits a short interval, so
+``-i 0.1 -t 8`` samples 64 ranks at 0.1 s instead of stretching to ~0.27 s; the
+monitor step asks Slurm for as many CPUs as threads.
 """
 
 from __future__ import annotations
@@ -46,8 +52,9 @@ from pathlib import Path
 
 from .monitor import stop_file_path
 
-VALUE_OPTIONS = {"-o", "--outdir", "-i", "--interval", "-p", "--pattern",
-                 "-j", "--jobid", "-l", "--label", "--pyspy-rate", "--pyspy-out"}
+VALUE_OPTIONS = {"-o", "--outdir", "-i", "--interval", "-t", "--threads",
+                 "-p", "--pattern", "-j", "--jobid", "-l", "--label",
+                 "--pyspy-rate", "--pyspy-out"}
 
 
 def _iso_now() -> str:
@@ -87,6 +94,10 @@ def parse_args(argv: "list[str] | None" = None) -> argparse.Namespace:
     parser.add_argument("-i", "--interval", type=float,
                         default=float(os.environ.get("MEM_INTERVAL", 5)),
                         help="sampling interval in seconds [$MEM_INTERVAL or 5]")
+    parser.add_argument("-t", "--threads", type=int,
+                        default=int(os.environ.get("MEM_THREADS", 1)),
+                        help="parallel Pss readers; the monitor step also requests "
+                             "this many CPUs [1]")
     parser.add_argument("-p", "--pattern", default=os.environ.get("MEM_PATTERN", "."),
                         help="process names to track [$MEM_PATTERN or .]")
     parser.add_argument("-j", "--jobid", default=os.environ.get("SLURM_JOB_ID", "local"),
@@ -113,17 +124,19 @@ def parse_args(argv: "list[str] | None" = None) -> argparse.Namespace:
 
 def monitor_command(args: argparse.Namespace) -> list[str]:
     return [sys.executable, "-m", "taurex_memory_profiler.monitor",
-            "-o", args.outdir, "-i", str(args.interval), "-p", args.pattern,
-            "-j", args.jobid]
+            "-o", args.outdir, "-i", str(args.interval), "-t", str(args.threads),
+            "-p", args.pattern, "-j", args.jobid]
 
 
 def start_monitors(args: argparse.Namespace) -> subprocess.Popen:
     command = monitor_command(args)
     if os.environ.get("SLURM_JOB_ID"):
         nodes = os.environ.get("SLURM_NNODES", "1")
-        # --overlap lets the monitoring step coexist with the job step
+        # --overlap lets the monitoring step coexist with the job step, and the
+        # step needs one CPU per Pss thread or the threads cannot run in parallel
         command = ["srun", f"--nodes={nodes}", f"--ntasks={nodes}",
-                   "--ntasks-per-node=1", "--cpus-per-task=1", "--overlap",
+                   "--ntasks-per-node=1",
+                   f"--cpus-per-task={max(1, args.threads)}", "--overlap",
                    *command]
     return subprocess.Popen(command)
 
@@ -161,6 +174,7 @@ def write_meta(args: argparse.Namespace, outdir: Path) -> Path:
         f"nodes={os.environ.get('SLURM_NNODES', '1')}",
         f"command={' '.join(args.command)}",
         f"interval={args.interval}",
+        f"threads={args.threads}",
         f"pattern={args.pattern}",
         f"pyspy={int(args.pyspy)}",
         f"pyspy_out={args.pyspy_out}",
@@ -225,7 +239,7 @@ def main(argv: "list[str] | None" = None) -> int:
         f"Command  : {' '.join(args.command)}",
         f"Job ID   : {args.jobid}   (label '{args.label}')",
         f"Nodes    : {os.environ.get('SLURM_NNODES', '1')}",
-        f"Interval : {args.interval} s   (pattern '{args.pattern}')",
+        f"Interval : {args.interval} s   (pattern '{args.pattern}', threads {args.threads})",
         f"Logs     : {outdir}",
         *([f"py-spy   : {args.pyspy_rate} Hz -> {args.pyspy_out}"] if args.pyspy else []),
         "============================================================",

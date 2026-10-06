@@ -18,6 +18,13 @@ divides every shared page by the number of processes mapping it, so sum(Pss) is
 the true physical footprint — use it to size ``--mem``. RSS is still logged for
 comparison and for kernels without smaps_rollup.
 
+Pss is the only expensive field: reading /proc/<pid>/smaps_rollup walks the
+target's page tables and costs milliseconds for a process with a large address
+space, so reading it for every rank in series is what silently stretches a
+requested interval (0.1 s became ~0.27 s for 64 ranks). ``-t/--threads`` reads
+Pss from parallel threads instead; give the step the matching CPUs
+(``taurex-mem-run`` does) so the requested interval is actually met.
+
 One monitor runs per node: :mod:`taurex_memory_profiler.runner` (``taurex-mem-run``)
 starts them, but the sampler also works standalone on a login node:
 
@@ -40,6 +47,7 @@ import signal
 import socket
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
@@ -116,10 +124,25 @@ def find_cgroup_file(jobid: str) -> str:
 
 
 def _job_cgroup_dir(path: str, jobid: str) -> str:
-    """Trim a per-task cgroup path back to the Slurm job directory."""
+    """Trim a per-task cgroup path back to the Slurm job directory.
+
+    Two layouts are handled: the legacy ``/job_<jobid>`` component, and the
+    systemd scope used by the cluster here, ``.../slurmstepd.scope/<job>/step_<n>``
+    where the job directory is the one right below ``slurmstepd.scope``. Without
+    the second case the sampler reads the counter of its own monitor task (a few
+    MB) instead of the whole job.
+    """
     marker = f"/job_{jobid}"
     index = path.find(marker)
-    return path[:index] + marker if index != -1 else path
+    if index != -1:
+        return path[:index] + marker
+    scope = "/slurmstepd.scope/"
+    index = path.find(scope)
+    if index != -1:
+        rest = path[index + len(scope):]
+        if rest:
+            return path[:index + len(scope)] + rest.split("/", 1)[0]
+    return path
 
 
 def user_pids(uid: int) -> Iterator[int]:
@@ -195,17 +218,21 @@ def read_cgroup_kb(cgroup_file: str) -> str:
 class Monitor:
     """Samples this node into ``memory_<jobid>_<node>.csv`` until told to stop."""
 
-    def __init__(self, outdir: Path, jobid: str, interval: float, pattern: str):
+    def __init__(self, outdir: Path, jobid: str, interval: float, pattern: str,
+                 threads: int = 1):
         self.outdir = Path(outdir)
         self.jobid = jobid
         self.interval = interval
         self.pattern = re.compile(pattern)
+        self.threads = max(1, threads)
         self.node = socket.gethostname().split(".")[0]
         self.uid = os.getuid()
         self.cgroup_file = find_cgroup_file(jobid)
         self.process_log = self.outdir / f"memory_{jobid}_{self.node}.csv"
         self.node_log = self.outdir / f"node_memory_{jobid}_{self.node}.csv"
         self.stop_file = stop_file_path(self.outdir, jobid)
+        # reading Pss is the only expensive step; spread it over threads when asked
+        self.pool = ThreadPoolExecutor(self.threads) if self.threads > 1 else None
 
     def banner(self) -> str:
         return "\n".join([
@@ -215,6 +242,7 @@ class Monitor:
             f"Node       : {self.node}",
             f"Job ID     : {self.jobid}",
             f"Interval   : {self.interval} s",
+            f"Pss threads: {self.threads}",
             f"Pattern    : {self.pattern.pattern}",
             f"Process log: {self.process_log}",
             f"Node log   : {self.node_log}",
@@ -225,19 +253,32 @@ class Monitor:
     def _sample_processes(self, ts: str, elapsed: float,
                           writer: Any) -> tuple[int, int, int, int]:
         """Append one row per matching process and return
-        (n_procs, sum_rss, sum_pss, sum_rss_anon) for the node log."""
-        n_procs = total_rss = total_pss = total_anon = 0
+        (n_procs, sum_rss, sum_pss, sum_rss_anon) for the node log.
+
+        The cheap /proc/<pid>/status reads happen first, then the expensive Pss
+        reads go through the thread pool (if any) so they overlap instead of
+        adding up.
+        """
+        targets = []
         for pid in user_pids(self.uid):
             status = read_status(pid)
             command = status.get("command", "")
             if not command or not self.pattern.search(command):
                 continue
-            rss = status["rss_kb"]
-            if rss <= 0:
+            if status["rss_kb"] <= 0:
                 continue
-            pss = read_pss_kb(pid)
+            targets.append((pid, status))
+
+        if self.pool is None:
+            pss_values = [read_pss_kb(pid) for pid, _ in targets]
+        else:
+            pss_values = list(self.pool.map(read_pss_kb, [pid for pid, _ in targets]))
+
+        n_procs = total_rss = total_pss = total_anon = 0
+        for (pid, status), pss in zip(targets, pss_values):
+            rss = status["rss_kb"]
             writer.writerow([
-                ts, self.node, pid, status["ppid"], command, rss, pss,
+                ts, self.node, pid, status["ppid"], status["command"], rss, pss,
                 status["vsz_kb"], status["vmpeak_kb"], status["data_kb"],
                 status["threads"], status["rss_anon_kb"], status["rss_file_kb"],
                 status["rss_shmem_kb"], f"{elapsed:.3f}",
@@ -298,6 +339,9 @@ class Monitor:
                         next_ms = _now_ms()
             except _Interrupted:
                 pass  # SIGTERM/SIGINT: leave the CSVs as they are
+            finally:
+                if self.pool is not None:
+                    self.pool.shutdown()
 
         print(f"Memory monitor stopped: {self.process_log}, {self.node_log}")
 
@@ -317,12 +361,17 @@ def parse_args(argv: "list[str] | None" = None) -> argparse.Namespace:
                              "use e.g. 'taurex|prterun' to reduce noise [.]")
     parser.add_argument("-j", "--jobid", default=os.environ.get("SLURM_JOB_ID", "local"),
                         help="job id used in the file names [$SLURM_JOB_ID or local]")
+    parser.add_argument("-t", "--threads", type=int,
+                        default=int(os.environ.get("MEM_THREADS", 1)),
+                        help="threads reading Pss in parallel; >1 needs the matching "
+                             "CPUs free on the node [1]")
     return parser.parse_args(argv)
 
 
 def main(argv: "list[str] | None" = None) -> None:
     args = parse_args(argv)
-    Monitor(args.outdir, args.jobid, args.interval, args.pattern).run()
+    Monitor(args.outdir, args.jobid, args.interval, args.pattern,
+            args.threads).run()
 
 
 if __name__ == "__main__":

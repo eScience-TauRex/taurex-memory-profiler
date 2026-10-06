@@ -117,6 +117,7 @@ taurex-mem-run -l mem_128_good -- mpirun -np 256 taurex -i parfile.par --retriev
 |---|---|---|
 | `-o, --outdir DIR` | `memory_logs` | where the CSVs go |
 | `-i, --interval SEC` | `5` | sampling interval (may be < 1) |
+| `-t, --threads N` | `1` | parallel Pss readers; the monitor step also requests N CPUs |
 | `-p, --pattern REGEX` | `.` | only track process names matching, e.g. `'taurex\|prterun'` |
 | `-j, --jobid ID` | `$SLURM_JOB_ID` or `local` | used in the file names |
 | `-l, --label NAME` | job id | label used by the plots |
@@ -124,11 +125,18 @@ taurex-mem-run -l mem_128_good -- mpirun -np 256 taurex -i parfile.par --retriev
 | `--pyspy-rate HZ` | `100` | py-spy sampling rate |
 | `--pyspy-out FILE` | `profile_<label>.svg` | py-spy output file |
 
-Environment: `MEM_INTERVAL` and `MEM_PATTERN` seed the matching options,
-`MEM_RUN_WAIT` sets how long to wait for the first samples (default
+Environment: `MEM_INTERVAL`, `MEM_THREADS` and `MEM_PATTERN` seed the matching
+options, `MEM_RUN_WAIT` sets how long to wait for the first samples (default
 `2*interval + 2`). Under Slurm the samplers run as one overlapping `srun` step
-per node; without Slurm only the local node is sampled, which makes
+per node, requesting `max(1, threads)` CPUs so the Pss threads can run in
+parallel; without Slurm only the local node is sampled, which makes
 `taurex-mem-run` usable on a login node for short tests.
+
+**Pss is what limits a short interval.** Reading `/proc/<pid>/smaps_rollup`
+walks the target's page tables and costs a few milliseconds for a rank with a
+large address space, so a serial read over 64 ranks stretches `-i 0.1` to
+~0.27 s. `-t 8` overlaps those reads (and asks Slurm for the 8 CPUs they need),
+so `-i 0.05` is actually reached; `-t 1` keeps the old single-CPU behaviour.
 
 ### CPU profile and timing (`--pyspy`)
 
@@ -413,6 +421,7 @@ python -m taurex_memory_profiler.monitor [-o OUTDIR] [-i INTERVAL] [-p PATTERN] 
 |---|---|---|
 | `-o, --outdir` | `memory_logs` (`$MEM_OUTDIR`) | where the CSVs go |
 | `-i, --interval` | `5` (`$MEM_INTERVAL`) | seconds between samples, may be < 1 |
+| `-t, --threads` | `1` (`$MEM_THREADS`) | threads reading Pss in parallel; >1 needs the CPUs free |
 | `-p, --pattern` | `.` (`$MEM_PATTERN`) | only track process names matching this regex |
 | `-j, --jobid` | `$SLURM_JOB_ID` or `local` | used in the file names |
 

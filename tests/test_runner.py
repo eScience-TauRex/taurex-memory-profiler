@@ -61,6 +61,23 @@ def test_runner_returns_the_command_exit_code():
         assert "Exit code: 3" in proc.stdout
 
 
+def test_runner_passes_threads_to_the_sampler():
+    """-t reaches the sampler and is recorded in the meta file."""
+    if not LINUX:
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        proc = call([*RUNNER, "-i", "0.2", "-t", "3", "-j", "4244",
+                     "--", "bash", "-c", "sleep 1"],
+                    cwd=tmp, MEM_RUN_WAIT="0")
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert "threads 3" in proc.stdout
+
+        logs = Path(tmp) / "memory_logs"
+        assert "threads=3" in (logs / "run_4244.meta").read_text()
+        assert list(logs.glob("node_memory_4244_*.csv"))
+
+
 def test_runner_without_a_command_fails():
     proc = call([*RUNNER, "-i", "1"])
     assert proc.returncode != 0
