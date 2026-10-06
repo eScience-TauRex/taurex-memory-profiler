@@ -12,4 +12,4 @@ are also runnable as modules, which is how the runner starts the per-node
 samplers.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
