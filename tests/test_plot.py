@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _helpers import PLOT, call  # noqa: E402  (needs the path tweak above)
+from _helpers import PLOT, SRC, call  # noqa: E402  (needs the path tweak above)
 
 
 def _fmt(t: dt.datetime) -> str:
@@ -409,6 +409,93 @@ def test_output_check_same_and_different():
         assert "unreadable output" in proc.stdout, proc.stdout
         assert "out_111.hdf5 vs out_222.hdf5" in proc.stdout, proc.stdout
         assert "unreadable output" in (logs / "report.md").read_text()
+
+
+def test_output_check_figure_always_shows_the_numbers():
+    """The output-check figure carries the numbers, it is never text only.
+
+    Two runs whose datasets moved a little but stayed inside the tolerance still
+    get bars (that was the regression: only the failures were drawn, so a
+    passing run produced a figure with nothing but a paragraph of text).
+    """
+    try:
+        import h5py
+        import matplotlib
+        import numpy as np
+    except ImportError:
+        print("SKIP test_output_check_figure_always_shows_the_numbers (no deps)")
+        return
+    matplotlib.use("Agg")
+
+    sys.path.insert(0, str(SRC))
+    from taurex_memory_profiler import plot as plotmod
+    from taurex_memory_profiler.outputs import compare_runs
+
+    class FakeRun:  # compare_runs only reads these three attributes
+        def __init__(self, source, meta, label):
+            self.source, self.meta, self.label = source, meta, label
+
+    def check_of(tmp: Path, name: str, write_a, write_b, rtol: float):
+        for stem, writer in (("a", write_a), ("b", write_b)):
+            with h5py.File(tmp / f"{name}_{stem}.hdf5", "w") as handle:
+                writer(handle, np)
+        runs = [FakeRun(str(tmp), {"label": "good",
+                                   "command": f"taurex -o {name}_a.hdf5"}, "good"),
+                FakeRun(str(tmp), {"label": "bad",
+                                   "command": f"taurex -o {name}_b.hdf5"}, "bad")]
+        (tmp / "memory_logs").mkdir(exist_ok=True)
+        checks = compare_runs(runs, {}, rtol=rtol, atol=0.0)
+        assert checks and checks[0].kind == "hdf5", checks
+        return checks[0]
+
+    captured: list = []
+    plotmod.save_fig = lambda fig, base: captured.append(fig)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+
+        # a) small differences, all inside the tolerance -> bars (not text)
+        def near_a(handle, np):
+            handle["profile"] = np.linspace(0.0, 1.0, 50)
+
+        def near_b(handle, np):
+            handle["profile"] = np.linspace(0.0, 1.0, 50) * (1 + 1e-5)
+
+        check = check_of(tmp, "near", near_a, near_b, rtol=1e-2)
+        assert check.same, check.diffs
+        plotmod.plot_output_check(check, tmp / "fig_near", 1e-2, "good")
+        head, ax = captured[-1].axes
+        assert head.patches, "the dataset roster must always be drawn"
+        assert len(ax.patches) == 1, "a dataset that moved must be drawn as a bar"
+        assert ax.get_xscale() == "log"
+        assert ax.get_yticklabels(), "each bar must be named"
+        assert any("rtol" in text.get_text() for text in ax.texts)
+
+        # b) the numbers are identical and only a shape differs: no bars, but
+        #    the figure still states the counts and names the difference
+        def shape_a(handle, np):
+            handle["alpha"] = np.zeros(4)
+            handle["profile"] = np.zeros(1)
+
+        def shape_b(handle, np):
+            handle["alpha"] = np.zeros(4)
+            handle["profile"] = np.zeros(3)
+
+        check = check_of(tmp, "shape", shape_a, shape_b, rtol=1e-6)
+        assert not check.same and check.diffs and check.datasets, check
+        plotmod.plot_output_check(check, tmp / "fig_shape", 1e-6, "good")
+        head, ax = captured[-1].axes
+        assert head.patches, "the dataset roster must always be drawn"
+        assert not ax.patches, "identical datasets must not be drawn as bars"
+        blob = " ".join(text.get_text() for text in ax.texts)
+        assert "identical to the baseline" in blob, blob
+        assert "shape" in blob, blob
+        assert "structural" in blob, blob
+        assert "✓" not in blob, "a structural difference is not a pass"
+
+    import matplotlib.pyplot as plt
+    for fig in captured:
+        plt.close(fig)
 
 
 def main():

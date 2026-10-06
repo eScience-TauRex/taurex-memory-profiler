@@ -47,6 +47,7 @@ class Check:
     total: int = 0                    # datasets compared (HDF5)
     worst: float | None = None        # largest relative difference
     datasets: list[DatasetDiff] = field(default_factory=list)   # numeric, worst first
+    failed: list[DatasetDiff] = field(default_factory=list)     # every failure
     diffs: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)   # structure, or why not checked
     note: str = ""
@@ -271,7 +272,8 @@ def compare_runs(runs: list, explicit: dict | None = None,
             check.total = result.get("total", 0)
             check.worst = result.get("worst")
             check.datasets = result.get("datasets", [])
-            check.diffs = [diff.message for diff in result.get("diffs", [])]
+            check.failed = result.get("diffs", [])
+            check.diffs = [diff.message for diff in check.failed]
             check.notes = result.get("notes", [])
             check.same = not check.diffs and not check.notes
         checks.append(check)
@@ -283,6 +285,35 @@ def checked_any(checks: list[Check]) -> bool:
     return any(check.kind != "missing" for check in checks)
 
 
+def largest_relative(check: Check) -> float | None:
+    """The largest relative difference measured for this run, pass or fail.
+
+    ``check.worst`` only tracks the failures, so a run whose only problem is
+    structural (a shape or dtype difference) would otherwise report ``None`` and
+    hide how far the numeric datasets actually moved. This reads the largest
+    difference from every measured dataset instead.
+    """
+    return max((d.rel for d in check.datasets if d.rel is not None), default=None)
+
+
+def structural_messages(check: Check) -> list[str]:
+    """The differences that carry no numeric value, so nothing to plot.
+
+    A shape or dtype mismatch is a *failure* with ``rel is None`` (it lands in
+    ``check.diffs``, not in ``check.notes``), and the "only in" / "unreadable"
+    notes are structure as well. Keeping them apart from the numeric failures is
+    what lets the figure say "everything numeric agrees, but the structure
+    differs" instead of a bare pass or a bare fail.
+    """
+    return ([d.message for d in check.failed if d.rel is None]
+            + list(check.notes))
+
+
+def structural_count(check: Check) -> int:
+    """How many of the reported differences have no numeric value to plot."""
+    return len(structural_messages(check))
+
+
 def format_checks(checks: list[Check], baseline_label: str, rtol: float) -> str:
     """The stdout block of the output check."""
     lines = [f"--- Output check (baseline {baseline_label}) ---"]
@@ -292,16 +323,23 @@ def format_checks(checks: list[Check], baseline_label: str, rtol: float) -> str:
             continue
         if check.same:
             if check.kind == "hdf5":
+                largest = largest_relative(check)
                 unit = f"{check.total} datasets, rtol {rtol:g}"
+                if largest is not None:
+                    unit += f", largest {largest:.3g} relative"
             else:
                 unit = "byte-identical"
             lines.append(f"  {check.label}: {check.path.name} - same ({unit})")
             continue
         problems = check.diffs + check.notes
         if check.kind == "hdf5":
-            worst = "" if check.worst is None else f", largest {check.worst:.3g} relative"
+            largest = largest_relative(check)
+            worst = "" if largest is None else f", largest {largest:.3g} relative"
             count = (f"{len(problems)} of {check.total} datasets" if check.total
                      else "unreadable output")
+            structural = structural_count(check)
+            if structural and check.total:
+                count += f" ({structural} structural)"
             head = (f"{check.label}: {check.path.name} - DIFFERENT from "
                     f"{check.baseline.name} ({count}{worst})")
         else:
@@ -325,10 +363,14 @@ def report_lines(checks: list[Check], rtol: float) -> list[str]:
             lines.append(f"| `{check.label}` | - | not checked ({check.note}) |")
         elif check.same:
             unit = f"{check.total} datasets" if check.kind == "hdf5" else "byte-identical"
+            largest = largest_relative(check)
+            if largest is not None:
+                unit += f", largest {largest:.3g} relative"
             lines.append(f"| `{check.label}` | `{check.path.name}` | same ({unit}) |")
         elif check.kind == "hdf5":
             count = len(check.diffs) + len(check.notes)
-            worst = "" if check.worst is None else f", largest {check.worst:.3g} relative"
+            largest = largest_relative(check)
+            worst = "" if largest is None else f", largest {largest:.3g} relative"
             what = (f"{count} of {check.total} datasets" if check.total
                     else "unreadable output")
             lines.append(f"| `{check.label}` | `{check.path.name}` | "

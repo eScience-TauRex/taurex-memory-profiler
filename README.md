@@ -234,8 +234,9 @@ limit.*
 
 ![output check](docs/output-check.png)
 *`outputs_<baseline>_vs_<label>.png` — did the compared runs produce the same
-result: the datasets whose values moved, worst first, with the value on both
-sides, and the verdict in the corner.*
+result: how the datasets split (roster on top), the datasets whose values moved,
+worst first, with the value on both sides and the tolerance as a dashed line, and
+the verdict in the corner.*
 
 With `--compare`, every compared run gets its own `memory_<label>.png` and
 `memory_<label>_total.png` first, so each run can be read on its own and the
@@ -378,13 +379,22 @@ instance — is reported as `unreadable output` instead of aborting the
 comparison. Use `--no-check-output` to skip the check, and `--report` to get the
 same table in the markdown.
 
-The check always draws a figure next to the others,
-`outputs_<baseline>_vs_<label>.png`: one bar per dataset that is outside the
-tolerance, longest first, each labelled with the value of the worst element in
-both runs, and the verdict in the corner. The datasets that are identical are
-counted under the panel instead of drawn, and when everything agrees the panel
-just states the largest difference, so a glance is enough to tell whether the
-runs are compatible.
+When the two outputs are comparable the check draws
+`outputs_<baseline>_vs_<label>.png`, with two panels so the numbers are always
+on the figure:
+
+* a **roster** of how the compared datasets split — identical, within the
+  tolerance, outside it, and structural (a shape or dtype difference, which has
+  no numeric value to plot);
+* the **detail**: one bar per dataset that moved, worst first, red outside the
+  tolerance and blue inside it, with the tolerance as a dashed line and each bar
+  labelled with the value of its worst element in both runs. The datasets inside
+  the tolerance are drawn too, so a run that passes still shows how close it was.
+  When nothing moved numerically the panel says so with the counts and lists what
+  did differ.
+
+A truncated or unreadable output has nothing to draw, so the figure is skipped
+and only the `unreadable output` line is reported.
 
 ### Read the comparison
 

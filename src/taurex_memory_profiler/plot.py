@@ -57,7 +57,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .outputs import checked_any, compare_runs, format_checks, report_lines
+from .outputs import (checked_any, compare_runs, format_checks, report_lines,
+                      structural_messages)
 
 KB_PER_GB = 1024.0 ** 2
 DEFAULT_LIMIT_GB = 224.0
@@ -887,61 +888,143 @@ def fmt_value(value: float) -> str:
 
 
 def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
-    """Draw where the output of one run moved compared with the baseline run.
+    """Draw how the output of one run compares with the baseline run's output.
 
-    The bars are the datasets that are outside the tolerance, worst first, each
-    labelled with the value of its worst element in both runs; the datasets that
-    are identical are counted instead of drawn, so the panel stays readable.
+    Two panels, so the figure always carries the numbers:
+
+    * a *roster* bar of how the compared datasets split — identical, within the
+      tolerance, outside it, structural (a shape or dtype difference, which has
+      no numeric value to plot);
+    * a *detail* chart of the datasets that moved, worst first, each labelled
+      with the value of its worst element in both runs: red outside the
+      tolerance, blue inside it, with the tolerance as a dashed line. Drawing
+      the passing datasets too is what shows how close a passing run was.
+
+    When nothing moved numerically the detail panel states that with the counts
+    and lists what did differ, instead of showing empty bars.
     """
     measured = [d for d in check.datasets if d.rel is not None]
+    changed = [d for d in measured if d.rel]     # moved at all, pass or fail
     failing = [d for d in measured if not d.same]
-    identical = sum(1 for d in measured if not d.rel)
+    structural = structural_messages(check)      # shape/dtype: nothing to plot
+    identical = len(measured) - len(changed)
+    largest = max((d.rel for d in measured), default=None)
 
-    fig, ax = plt.subplots(figsize=(12, max(3.2, 1.5 + 0.34 * len(failing[:15]))))
+    shown = changed[:20]                         # worst first
+    roster = [("identical", identical, BAND),
+              ("within rtol", len(changed) - len(failing), BLUE),
+              ("outside rtol", len(failing), OOM_RED),
+              ("structural", len(structural), ORANGE)]
+    roster = [row for row in roster if row[1]]
+
+    # height_ratios only: an explicit hspace would make tight_layout bail out
+    if shown:
+        fig, (head, ax) = plt.subplots(
+            2, 1, figsize=(12, max(4.8, 2.9 + 0.34 * len(shown))),
+            gridspec_kw={"height_ratios": [1.4, 5]})
+    else:
+        fig, (head, ax) = plt.subplots(
+            2, 1, figsize=(12, 4.0), gridspec_kw={"height_ratios": [1.4, 3.4]})
     fig.patch.set_facecolor("#fcfcfb")
 
-    shown = failing[:15]
+    # --- the roster: always drawn, so the split is visible at a glance -------
+    positions = np.arange(len(roster))[::-1]
+    head.barh(positions, [row[1] for row in roster],
+              color=[row[2] for row in roster], height=0.62)
+    for position, (label, count, color) in zip(positions, roster):
+        head.annotate(str(count), (count, position), xytext=(4, 0),
+                      textcoords="offset points", va="center", fontsize=8.5,
+                      color=color)
+    head.set_yticks(positions)
+    head.set_yticklabels([row[0] for row in roster], fontsize=9, color=INK2)
+    head.set_xticks([])
+    head.set_xlim(0, max(row[1] for row in roster) * 1.25)
+    head.grid(False)
+    for side in ("top", "right", "left", "bottom"):
+        head.spines[side].set_visible(False)
+    head.set_title(f"Output check: {check.label} vs {baseline_label}",
+                   color=INK, fontsize=11, loc="left")
+
     if shown:
+        # --- the detail: how far each dataset that moved did move -------------
         finite = [d.rel for d in shown if np.isfinite(d.rel)]
-        top = max(finite) if finite else 1.0
+        top = max(finite, default=rtol)
+        floor = (min(finite) if finite else rtol) / 10
+
+        def bar_width(rel: float) -> float:
+            return max(rel if np.isfinite(rel) else top, floor)
+
         positions = np.arange(len(shown))[::-1]      # worst at the top
-        ax.barh(positions, [d.rel if np.isfinite(d.rel) else top for d in shown],
-                color=OOM_RED, height=0.62)
-        for pos, diff in zip(positions, shown):
-            note = "no change" if not diff.rel else f"{fmt_value(diff.left)} → {fmt_value(diff.right)}"
-            ax.annotate(f"{note}", (diff.rel if np.isfinite(diff.rel) else top, pos),
-                        xytext=(5, 0), textcoords="offset points", va="center",
-                        fontsize=8.5, color=INK2)
+        ax.barh(positions, [bar_width(d.rel) for d in shown],
+                color=[OOM_RED if not d.same else BLUE for d in shown], height=0.62)
+        for position, diff in zip(positions, shown):
+            ax.annotate(f"{fmt_value(diff.left)} → {fmt_value(diff.right)}",
+                        (bar_width(diff.rel), position), xytext=(5, 0),
+                        textcoords="offset points", va="center", fontsize=8.5,
+                        color=INK2)
+        if floor / 3 <= rtol <= max(top, floor) * 60:
+            ax.axvline(rtol, color=MUTED, ls="--", lw=1.1)
+            ax.annotate(f"rtol {rtol:g}", (rtol, len(shown) - 0.35), xytext=(4, 0),
+                        textcoords="offset points", va="center", fontsize=8.5,
+                        color=MUTED)
         ax.set_yticks(positions)
         ax.set_yticklabels([output_name(d.name) for d in shown], fontsize=8.5, color=INK2)
         ax.set_xscale("log")
-        ax.set_xlim(left=min(finite) / 3 if finite else 1e-3, right=top * 60)
+        ax.set_xlim(left=floor / 3, right=max(top, floor) * 60)
+        xlabel = (f"relative difference  max|a-b| / max|b|   "
+                  f"(dashed line: rtol {rtol:g})")
     else:
+        # nothing moved numerically: say so with the numbers and show what did
+        # differ, rather than drawing flat bars that carry no information
         ax.axis("off")
-        lines = check.diffs[:6] + check.notes[:4]
-        if lines:
-            text, color, size = "\n".join(lines), INK2, 9.5
-            weight, family = "normal", "monospace"
+        if measured:
+            headline = (f"all {len(measured)} numeric datasets are identical "
+                        f"to the baseline")
+            headline_color = AQUA
+        elif check.same:
+            headline = "the compared outputs are byte-identical"
+            headline_color = AQUA
         else:
-            largest = max((d.rel for d in measured), default=0.0)
-            text = (f"all {check.total} datasets within rtol {rtol:g}\n"
-                    f"largest relative difference {largest:.3g}")
-            color, size, weight, family = AQUA, 12, "bold", "sans-serif"
-        ax.text(0.01, 0.98, text, va="top", fontsize=size, color=color,
-                family=family, fontweight=weight)
+            headline = "no numeric datasets could be compared"
+            headline_color = OOM_RED
+        ax.text(0.005, 0.92, headline, va="top", fontsize=11.5,
+                fontweight="bold", color=headline_color)
+        lines = (check.diffs + check.notes)[:8]
+        if lines:
+            ax.text(0.005, 0.62, "\n".join(f"• {line}" for line in lines), va="top",
+                    fontsize=9.5, color=OOM_RED if check.diffs else INK2,
+                    family="monospace")
+        elif measured:
+            ax.text(0.005, 0.62, "the outputs of the two runs agree numerically",
+                    va="top", fontsize=9.5, color=INK2)
+        xlabel = None
 
-    style(ax, f"Output check: {check.label} vs {baseline_label}",
-          xlabel="relative difference  max|a-b| / max|b|")
-    verdict = (f"✓ {check.total} datasets within rtol {rtol:g}" if check.same else
-               f"✗ {len(check.diffs) + len(check.notes)} of {check.total} datasets "
-               f"outside rtol {rtol:g}")
-    ax.annotate(verdict, (0.995, 0.02), xycoords="axes fraction", ha="right",
-                fontsize=10.5, fontweight="bold",
-                color=AQUA if check.same else OOM_RED)
-    fig.text(0.01, 0.005,
-             f"{check.path.name} vs {check.baseline.name} — {identical} identical "
-             f"datasets not drawn", fontsize=8.5, color=MUTED)
-    fig.tight_layout(rect=(0, 0.02, 1, 1))
+    style(ax, "", xlabel=xlabel)
+
+    problems = []
+    if failing:
+        problems.append(f"{len(failing)} outside rtol {rtol:g}")
+    if structural:
+        problems.append(f"{len(structural)} structural")
+    if not problems:
+        verdict = f"✓ {check.total} datasets within rtol {rtol:g}"
+    elif check.total:
+        verdict = f"✗ {', '.join(problems)} of {check.total} datasets"
+    else:
+        verdict = f"✗ {', '.join(problems)}"
+    if largest is not None:
+        verdict += f"   |   largest {largest:.3g}"
+    ax.annotate(verdict, (1, 1.02), xycoords="axes fraction", ha="right",
+                va="bottom", fontsize=10.5, fontweight="bold",
+                color=AQUA if not problems else OOM_RED)
+
+    caption = [f"{check.path.name} vs {check.baseline.name}"]
+    if shown:
+        caption.append(f"showing the {len(shown)} largest of {len(changed)} "
+                       f"datasets that moved")
+    caption += structural[:3]
+    fig.text(0.01, 0.005, " — ".join(caption), fontsize=8.5, color=MUTED, va="bottom")
+    fig.tight_layout(rect=(0, 0.04, 1, 0.97), h_pad=2.2)
     save_fig(fig, base)
 
 
@@ -1297,6 +1380,8 @@ def main(argv=None):
         if checked_any(checks) or explicit:
             print(format_checks(checks, runs[0].label, args.output_rtol))
         for check in checks:
+            # a truncated or unreadable output has nothing to draw: it is only
+            # reported in the text, there is no comparison to make
             if check.datasets:
                 plot_output_check(
                     check,
