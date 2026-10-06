@@ -411,19 +411,19 @@ def test_output_check_same_and_different():
         assert "unreadable output" in (logs / "report.md").read_text()
 
 
-def test_output_check_figure_always_shows_the_numbers():
-    """The output-check figure carries the numbers, it is never text only.
+def test_output_check_figure_shows_the_values():
+    """The output-check figure overlays the quantities, it is not a text panel.
 
-    Two runs whose datasets moved a little but stayed inside the tolerance still
-    get bars (that was the regression: only the failures were drawn, so a
-    passing run produced a figure with nothing but a paragraph of text).
+    An array dataset (a profile, an SED) must be drawn once per run so the
+    values can be read against each other, and the scalar parameters must get a
+    parity panel instead of a paragraph.
     """
     try:
         import h5py
         import matplotlib
         import numpy as np
     except ImportError:
-        print("SKIP test_output_check_figure_always_shows_the_numbers (no deps)")
+        print("SKIP test_output_check_figure_shows_the_values (no deps)")
         return
     matplotlib.use("Agg")
 
@@ -443,7 +443,6 @@ def test_output_check_figure_always_shows_the_numbers():
                                    "command": f"taurex -o {name}_a.hdf5"}, "good"),
                 FakeRun(str(tmp), {"label": "bad",
                                    "command": f"taurex -o {name}_b.hdf5"}, "bad")]
-        (tmp / "memory_logs").mkdir(exist_ok=True)
         checks = compare_runs(runs, {}, rtol=rtol, atol=0.0)
         assert checks and checks[0].kind == "hdf5", checks
         return checks[0]
@@ -454,44 +453,42 @@ def test_output_check_figure_always_shows_the_numbers():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
 
-        # a) small differences, all inside the tolerance -> bars (not text)
-        def near_a(handle, np):
-            handle["profile"] = np.linspace(0.0, 1.0, 50)
+        # a) a profile that moved a little and one scalar we can point at
+        def small_a(handle, np):
+            handle["profile"] = np.linspace(1.0, 2.0, 40)
+            handle["temperature"] = np.float64(1500.0)
 
-        def near_b(handle, np):
-            handle["profile"] = np.linspace(0.0, 1.0, 50) * (1 + 1e-5)
+        def small_b(handle, np):
+            handle["profile"] = np.linspace(1.0, 2.0, 40) * (1 + 1e-5)
+            handle["temperature"] = np.float64(1500.5)
 
-        check = check_of(tmp, "near", near_a, near_b, rtol=1e-2)
-        assert check.same, check.diffs
-        plotmod.plot_output_check(check, tmp / "fig_near", 1e-2, "good")
-        head, ax = captured[-1].axes
-        assert head.patches, "the dataset roster must always be drawn"
-        assert len(ax.patches) == 1, "a dataset that moved must be drawn as a bar"
-        assert ax.get_xscale() == "log"
-        assert ax.get_yticklabels(), "each bar must be named"
-        assert any("rtol" in text.get_text() for text in ax.texts)
+        check = check_of(tmp, "small", small_a, small_b, rtol=1e-2)
+        plotmod.plot_output_check(check, tmp / "fig_small", 1e-2, "good")
+        fig = captured[-1]
+        overlay = [ax for ax in fig.axes if len(ax.lines) >= 2]
+        parity = [ax for ax in fig.axes if ax.collections]
+        assert overlay, "the profile must be overlaid from both runs"
+        assert parity, "the scalars must get a parity panel"
+        assert len(overlay[0].lines) == 2, "baseline and the other run"
 
-        # b) the numbers are identical and only a shape differs: no bars, but
-        #    the figure still states the counts and names the difference
+        # b) the profile changed length: the values are still overlaid and the
+        #    mismatch is stated, it is not a text-only figure
         def shape_a(handle, np):
-            handle["alpha"] = np.zeros(4)
-            handle["profile"] = np.zeros(1)
+            handle["profile"] = np.zeros(50)
+            handle["temperature"] = np.float64(1500.0)
 
         def shape_b(handle, np):
-            handle["alpha"] = np.zeros(4)
-            handle["profile"] = np.zeros(3)
+            handle["profile"] = np.zeros(12)
+            handle["temperature"] = np.float64(1500.0)
 
         check = check_of(tmp, "shape", shape_a, shape_b, rtol=1e-6)
-        assert not check.same and check.diffs and check.datasets, check
+        assert not check.same, check
         plotmod.plot_output_check(check, tmp / "fig_shape", 1e-6, "good")
-        head, ax = captured[-1].axes
-        assert head.patches, "the dataset roster must always be drawn"
-        assert not ax.patches, "identical datasets must not be drawn as bars"
-        blob = " ".join(text.get_text() for text in ax.texts)
-        assert "identical to the baseline" in blob, blob
-        assert "shape" in blob, blob
+        fig = captured[-1]
+        assert [ax for ax in fig.axes if len(ax.lines) >= 2], "still overlaid"
+        blob = " ".join(t.get_text() for ax in fig.axes for t in ax.texts)
+        assert "different lengths" in blob, blob
         assert "structural" in blob, blob
-        assert "✓" not in blob, "a structural difference is not a pass"
 
     import matplotlib.pyplot as plt
     for fig in captured:

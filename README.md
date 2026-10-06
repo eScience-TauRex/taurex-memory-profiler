@@ -234,9 +234,9 @@ limit.*
 
 ![output check](docs/output-check.png)
 *`outputs_<baseline>_vs_<label>.png` — did the compared runs produce the same
-result: how the datasets split (roster on top), the datasets whose values moved,
-worst first, with the value on both sides and the tolerance as a dashed line, and
-the verdict in the corner.*
+result: the split of the datasets (roster on top), then the quantities
+themselves overlaid from both runs — SED, pressure profile, chemistry ratio —
+with the scalar parameters on a parity panel, and the verdict in the corner.*
 
 With `--compare`, every compared run gets its own `memory_<label>.png` and
 `memory_<label>_total.png` first, so each run can be read on its own and the
@@ -380,21 +380,22 @@ comparison. Use `--no-check-output` to skip the check, and `--report` to get the
 same table in the markdown.
 
 When the two outputs are comparable the check draws
-`outputs_<baseline>_vs_<label>.png`, with two panels so the numbers are always
-on the figure:
+`outputs_<baseline>_vs_<label>.png`, which compares the runs **by value**: a thin
+roster bar says how the datasets split (identical / within the tolerance /
+outside it / structural), and the body is the data itself, one panel per dataset
+that carries values:
 
-* a **roster** of how the compared datasets split — identical, within the
-  tolerance, outside it, and structural (a shape or dtype difference, which has
-  no numeric value to plot);
-* the **detail**: one bar per dataset that moved, worst first, red outside the
-  tolerance and blue inside it, with the tolerance as a dashed line and each bar
-  labelled with the value of its worst element in both runs. The datasets inside
-  the tolerance are drawn too, so a run that passes still shows how close it was.
-  When nothing moved numerically the panel says so with the counts and lists what
-  did differ.
+* arrays — a pressure profile, an SED, a spectrum, a posterior — are overlaid
+  from both runs, so the shapes and the actual differences are readable, and
+  each panel carries its `max|Δ|` (or says the two lengths differ);
+* the scalar parameters share a parity panel: a point on the dashed diagonal
+  means the two runs agree on that parameter, an off-diagonal point is a
+  parameter that moved.
 
-A truncated or unreadable output has nothing to draw, so the figure is skipped
-and only the `unreadable output` line is reported.
+Differences with no numeric value — a shape or dtype change — cannot be drawn,
+so they are named in the caption and counted in the verdict. A truncated or
+unreadable output has nothing to draw, so the figure is skipped and only the
+`unreadable output` line is reported.
 
 ### Read the comparison
 

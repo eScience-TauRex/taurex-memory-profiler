@@ -887,21 +887,106 @@ def fmt_value(value: float) -> str:
     return f"{value:.4g}" if np.isfinite(value) else "inf"
 
 
+def _numeric_datasets(path_a: Path, path_b: Path, max_arrays: int = 6):
+    """Read the numeric datasets of two outputs, biggest arrays first.
+
+    Returns ``(arrays, scalars)``, each a list of ``(name, baseline, other)``.
+    Arrays are what carries the physics (a pressure profile, an SED, a spectrum)
+    and are what the figure overlays; the scalars are the parameters, which are
+    compared point by point on a parity panel.
+    """
+    import h5py
+
+    arrays, scalars = [], []
+    with h5py.File(path_a, "r") as fa, h5py.File(path_b, "r") as fb:
+        names: list[str] = []
+        fa.visititems(lambda n, o: names.append(n)
+                      if isinstance(o, h5py.Dataset) else None)
+        for name in sorted(names):
+            if name not in fb:
+                continue
+            data_a, data_b = fa[name], fb[name]
+            if data_a.dtype.kind not in "fiub" or data_b.dtype.kind not in "fiub":
+                continue
+            a, b = np.asarray(data_a[()]), np.asarray(data_b[()])
+            if a.ndim > 2 or b.ndim > 2:
+                continue
+            (arrays if a.ndim >= 1 else scalars).append((name, a, b))
+    # the largest arrays are the informative ones; the scalars all fit one panel
+    arrays.sort(key=lambda item: item[1].size, reverse=True)
+    return arrays[:max_arrays], scalars
+
+
+def _value_panel(ax, name: str, a: np.ndarray, b: np.ndarray, other_label: str):
+    """Overlay the values of one dataset from both runs."""
+    if a.ndim <= 1:
+        series = [(a, b)]
+    else:  # 2D: one line per column, a handful at most to stay readable
+        columns = min(a.shape[1], b.shape[1], 8)
+        series = [(a[:, i], b[:, i]) for i in range(columns)]
+    for a_col, b_col in series:
+        ax.plot(np.arange(a_col.size), a_col, color=BLUE, lw=1.2)
+        ax.plot(np.arange(b_col.size), b_col, color=ORANGE, lw=1.2)
+    style(ax, output_name(name, 46), ylabel="value")
+    ax.set_xlabel("index", color=INK2, fontsize=9)
+    ax.legend(handles=[plt.Line2D([], [], color=BLUE, lw=2, label="baseline"),
+                       plt.Line2D([], [], color=ORANGE, lw=2, label=other_label)],
+              fontsize=8, frameon=False, labelcolor=INK2)
+    if a.shape == b.shape:
+        worst = float(np.max(np.abs(a.astype("f8") - b.astype("f8")))) if a.size else 0.0
+        ax.annotate(f"max|Δ| {worst:.3g}", (0.995, 0.04), xycoords="axes fraction",
+                    ha="right", fontsize=8.5, color=MUTED)
+    else:
+        ax.annotate(f"different lengths: {a.size} vs {b.size}", (0.995, 0.04),
+                    xycoords="axes fraction", ha="right", fontsize=8.5, color=OOM_RED)
+
+
+def _scalar_panel(ax, scalars, other_label: str):
+    """Parity plot of the scalar parameters: on the diagonal means identical."""
+    values_a = np.array([float(a) for _n, a, _b in scalars])
+    values_b = np.array([float(b) for _n, _a, b in scalars])
+    log = bool(np.all(values_a > 0) and np.all(values_b > 0)
+               and values_a.max() / values_a.min() > 1e3)
+    lo = min(values_a.min(), values_b.min())
+    hi = max(values_a.max(), values_b.max())
+    if log:
+        ax.set_xscale("log")
+        ax.set_yscale("log")
+        lo, hi = lo / 3, hi * 3
+    if hi <= lo:                     # one parameter, or all of them equal
+        pad = abs(lo) * 0.25 or 1.0
+        lo, hi = lo - pad, hi + pad
+    ax.plot([lo, hi], [lo, hi], color=MUTED, ls="--", lw=1.1, zorder=1)
+    ax.scatter(values_a, values_b, s=18, color=BLUE, zorder=3)
+    style(ax, f"{len(scalars)} scalar parameters", xlabel="baseline",
+          ylabel=other_label)
+    ax.set_xlim(lo, hi)
+    ax.set_ylim(lo, hi)
+    offset = int(np.argmax(np.abs(values_b - values_a))) if scalars else 0
+    if scalars and not np.array_equal(values_a, values_b):
+        ax.annotate(output_name(scalars[offset][0], 34),
+                    (values_a[offset], values_b[offset]), xytext=(6, -10),
+                    textcoords="offset points", fontsize=8, color=OOM_RED)
+    ax.annotate(f"{len(scalars)} identical" if np.array_equal(values_a, values_b)
+                else "off the dashed line = different",
+                (0.995, 0.04), xycoords="axes fraction", ha="right",
+                fontsize=8.5, color=AQUA if np.array_equal(values_a, values_b) else OOM_RED)
+
+
 def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
-    """Draw how the output of one run compares with the baseline run's output.
+    """Compare the two runs' outputs *by value*: overlay the quantities.
 
-    Two panels, so the figure always carries the numbers:
+    A thin roster bar says how the datasets split (identical / within the
+    tolerance / outside it / structural), then the body of the figure is the
+    data itself, one panel per dataset that carries values:
 
-    * a *roster* bar of how the compared datasets split — identical, within the
-      tolerance, outside it, structural (a shape or dtype difference, which has
-      no numeric value to plot);
-    * a *detail* chart of the datasets that moved, worst first, each labelled
-      with the value of its worst element in both runs: red outside the
-      tolerance, blue inside it, with the tolerance as a dashed line. Drawing
-      the passing datasets too is what shows how close a passing run was.
+    * arrays (pressure profiles, SEDs, spectra, posteriors) are overlaid from
+      both runs, so the shapes and the differences are visible directly;
+    * the scalar parameters share a parity panel, where a point on the dashed
+      diagonal means the two runs agree on that parameter.
 
-    When nothing moved numerically the detail panel states that with the counts
-    and lists what did differ, instead of showing empty bars.
+    Differences that have no numeric value — a shape or dtype change — cannot be
+    drawn and are named in the caption and the verdict.
     """
     measured = [d for d in check.datasets if d.rel is not None]
     changed = [d for d in measured if d.rel]     # moved at all, pass or fail
@@ -910,28 +995,31 @@ def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
     identical = len(measured) - len(changed)
     largest = max((d.rel for d in measured), default=None)
 
-    shown = changed[:20]                         # worst first
     roster = [("identical", identical, BAND),
               ("within rtol", len(changed) - len(failing), BLUE),
               ("outside rtol", len(failing), OOM_RED),
               ("structural", len(structural), ORANGE)]
     roster = [row for row in roster if row[1]]
 
-    # height_ratios only: an explicit hspace would make tight_layout bail out
-    if shown:
-        fig, (head, ax) = plt.subplots(
-            2, 1, figsize=(12, max(4.8, 2.9 + 0.34 * len(shown))),
-            gridspec_kw={"height_ratios": [1.4, 5]})
-    else:
-        fig, (head, ax) = plt.subplots(
-            2, 1, figsize=(12, 4.0), gridspec_kw={"height_ratios": [1.4, 3.4]})
+    # --- figure: a roster strip, then one panel per dataset with values ----
+    arrays, scalars = ([], [])
+    if check.kind == "hdf5" and check.baseline is not None and check.path is not None:
+        arrays, scalars = _numeric_datasets(check.baseline, check.path)
+
+    panels = len(arrays) + (1 if scalars else 0)
+    columns = 2
+    rows = max(1, -(-panels // columns))          # ceil
+    fig = plt.figure(figsize=(13, 2.0 + 3.0 * (1 + rows)))
+    gs = fig.add_gridspec(1 + rows, columns, height_ratios=[0.55] + [3.0] * rows,
+                          hspace=0.75, wspace=0.22)
     fig.patch.set_facecolor("#fcfcfb")
 
-    # --- the roster: always drawn, so the split is visible at a glance -------
+    # the roster: a one-glance split of how the compared datasets behaved
+    head = fig.add_subplot(gs[0, :])
     positions = np.arange(len(roster))[::-1]
     head.barh(positions, [row[1] for row in roster],
               color=[row[2] for row in roster], height=0.62)
-    for position, (label, count, color) in zip(positions, roster):
+    for position, (_label, count, color) in zip(positions, roster):
         head.annotate(str(count), (count, position), xytext=(4, 0),
                       textcoords="offset points", va="center", fontsize=8.5,
                       color=color)
@@ -945,61 +1033,16 @@ def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
     head.set_title(f"Output check: {check.label} vs {baseline_label}",
                    color=INK, fontsize=11, loc="left")
 
-    if shown:
-        # --- the detail: how far each dataset that moved did move -------------
-        finite = [d.rel for d in shown if np.isfinite(d.rel)]
-        top = max(finite, default=rtol)
-        floor = (min(finite) if finite else rtol) / 10
-
-        def bar_width(rel: float) -> float:
-            return max(rel if np.isfinite(rel) else top, floor)
-
-        positions = np.arange(len(shown))[::-1]      # worst at the top
-        ax.barh(positions, [bar_width(d.rel) for d in shown],
-                color=[OOM_RED if not d.same else BLUE for d in shown], height=0.62)
-        for position, diff in zip(positions, shown):
-            ax.annotate(f"{fmt_value(diff.left)} → {fmt_value(diff.right)}",
-                        (bar_width(diff.rel), position), xytext=(5, 0),
-                        textcoords="offset points", va="center", fontsize=8.5,
-                        color=INK2)
-        if floor / 3 <= rtol <= max(top, floor) * 60:
-            ax.axvline(rtol, color=MUTED, ls="--", lw=1.1)
-            ax.annotate(f"rtol {rtol:g}", (rtol, len(shown) - 0.35), xytext=(4, 0),
-                        textcoords="offset points", va="center", fontsize=8.5,
-                        color=MUTED)
-        ax.set_yticks(positions)
-        ax.set_yticklabels([output_name(d.name) for d in shown], fontsize=8.5, color=INK2)
-        ax.set_xscale("log")
-        ax.set_xlim(left=floor / 3, right=max(top, floor) * 60)
-        xlabel = (f"relative difference  max|a-b| / max|b|   "
-                  f"(dashed line: rtol {rtol:g})")
-    else:
-        # nothing moved numerically: say so with the numbers and show what did
-        # differ, rather than drawing flat bars that carry no information
-        ax.axis("off")
-        if measured:
-            headline = (f"all {len(measured)} numeric datasets are identical "
-                        f"to the baseline")
-            headline_color = AQUA
-        elif check.same:
-            headline = "the compared outputs are byte-identical"
-            headline_color = AQUA
-        else:
-            headline = "no numeric datasets could be compared"
-            headline_color = OOM_RED
-        ax.text(0.005, 0.92, headline, va="top", fontsize=11.5,
-                fontweight="bold", color=headline_color)
-        lines = (check.diffs + check.notes)[:8]
-        if lines:
-            ax.text(0.005, 0.62, "\n".join(f"• {line}" for line in lines), va="top",
-                    fontsize=9.5, color=OOM_RED if check.diffs else INK2,
-                    family="monospace")
-        elif measured:
-            ax.text(0.005, 0.62, "the outputs of the two runs agree numerically",
-                    va="top", fontsize=9.5, color=INK2)
-        xlabel = None
-
-    style(ax, "", xlabel=xlabel)
+    # the body: the quantities themselves, overlaid, then the parameters
+    drawn = 0
+    for name, a, b in arrays:
+        _value_panel(fig.add_subplot(gs[1 + drawn // columns, drawn % columns]),
+                     name, a, b, check.label)
+        drawn += 1
+    if scalars:
+        _scalar_panel(fig.add_subplot(gs[1 + drawn // columns, drawn % columns]),
+                      scalars, check.label)
+        drawn += 1
 
     problems = []
     if failing:
@@ -1007,24 +1050,39 @@ def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
     if structural:
         problems.append(f"{len(structural)} structural")
     if not problems:
-        verdict = f"✓ {check.total} datasets within rtol {rtol:g}"
+        verdict = f"\u2713 {check.total} datasets within rtol {rtol:g}"
     elif check.total:
-        verdict = f"✗ {', '.join(problems)} of {check.total} datasets"
+        verdict = f"\u2717 {', '.join(problems)} of {check.total} datasets"
     else:
-        verdict = f"✗ {', '.join(problems)}"
+        verdict = f"\u2717 {', '.join(problems)}"
     if largest is not None:
         verdict += f"   |   largest {largest:.3g}"
-    ax.annotate(verdict, (1, 1.02), xycoords="axes fraction", ha="right",
-                va="bottom", fontsize=10.5, fontweight="bold",
-                color=AQUA if not problems else OOM_RED)
+    head.annotate(verdict, (1.0, 1.05), xycoords="axes fraction", ha="right",
+                  va="bottom", fontsize=10.5, fontweight="bold",
+                  color=AQUA if not problems else OOM_RED)
+
+    if not drawn:
+        # nothing with a value to show (a byte comparison, all-text datasets)
+        body = fig.add_subplot(gs[1:, :])
+        body.axis("off")
+        if check.same:
+            body.text(0.005, 0.9, "the compared outputs are identical", va="top",
+                      fontsize=12, fontweight="bold", color=AQUA)
+        else:
+            body.text(0.005, 0.9, "no numeric dataset to compare", va="top",
+                      fontsize=12, fontweight="bold", color=INK2)
+            lines = (check.diffs + check.notes)[:6]
+            if lines:
+                body.text(0.005, 0.6, "\n".join(f"\u2022 {line}" for line in lines),
+                          va="top", fontsize=9.5, color=OOM_RED, family="monospace")
 
     caption = [f"{check.path.name} vs {check.baseline.name}"]
-    if shown:
-        caption.append(f"showing the {len(shown)} largest of {len(changed)} "
-                       f"datasets that moved")
-    caption += structural[:3]
-    fig.text(0.01, 0.005, " — ".join(caption), fontsize=8.5, color=MUTED, va="bottom")
-    fig.tight_layout(rect=(0, 0.04, 1, 0.97), h_pad=2.2)
+    if arrays:
+        caption.append(f"{len(arrays)} datasets with values overlaid")
+    if structural:
+        caption.append("structural: " + "; ".join(structural[:2]))
+    fig.text(0.01, 0.008, " — ".join(caption), fontsize=8.5, color=MUTED, va="bottom")
+    gs.update(left=0.055, right=0.985, top=0.92, bottom=0.07)
     save_fig(fig, base)
 
 
