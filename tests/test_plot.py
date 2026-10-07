@@ -365,8 +365,17 @@ def test_output_check_same_and_different():
         (logs / "run_222.meta").write_text(
             "label=mem_64_bad\njobid=222\ncommand=taurex -o out_222.hdf5\n")
 
+        # the fixtures have no forward 'Output' group, so the TauREx plotter
+        # cannot read them and the figure is only drawn when it is asked for
+        proc = call([*PLOT, "--logdir", str(logs), "--compare",
+                     "mem_64_good", "mem_64_bad", "--no-overview", "--no-total",
+                     "--output-dir", str(logs)])
+        assert proc.returncode == 0, proc.stderr
+        assert "no retrieval-plot comparison" in proc.stdout, proc.stdout
+        assert not (logs / "outputs_mem_64_good_vs_mem_64_bad.png").exists()
+
         out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad",
-                       "--report", logs / "report.md",
+                       "--report", logs / "report.md", "--values-fallback",
                        "--output-dir", logs)
         assert "Output check (baseline mem_64_good)" in out, out
         assert "same (2 datasets" in out, out
@@ -379,7 +388,7 @@ def test_output_check_same_and_different():
             handle["model"] = "tau"
         proc = call([*PLOT, "--logdir", str(logs), "--compare",
                      "mem_64_good", "mem_64_bad", "--no-overview", "--no-total",
-                     "--output-dir", str(logs)])
+                     "--values-fallback", "--output-dir", str(logs)])
         assert proc.returncode == 0, proc.stderr
         assert "DIFFERENT" in proc.stdout and "profile" in proc.stdout, proc.stdout
 
@@ -387,7 +396,8 @@ def test_output_check_same_and_different():
         out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad",
                        "--check-output", "out_111.hdf5",
                        "--check-output", "mem_64_bad=out_111.hdf5",
-                       "--no-overview", "--no-total", "--output-dir", logs)
+                       "--values-fallback", "--no-overview", "--no-total",
+                       "--output-dir", logs)
         assert "same (2 datasets" in out, out
 
         # --no-check-output leaves the comparison alone
@@ -487,8 +497,11 @@ def test_output_check_figure_shows_the_values():
         fig = captured[-1]
         assert [ax for ax in fig.axes if len(ax.lines) >= 2], "still overlaid"
         blob = " ".join(t.get_text() for ax in fig.axes for t in ax.texts)
+        blob += " " + " ".join(t.get_text() for t in fig.texts)
+        blob += " " + (fig.get_suptitle() or "")
         assert "different lengths" in blob, blob
-        assert "structural" in blob, blob
+        assert "shape" in blob, blob            # named in the caption
+        assert "structural" in blob, blob       # counted in the verdict
 
     import matplotlib.pyplot as plt
     for fig in captured:
@@ -511,8 +524,10 @@ def test_retrieval_plot_comparison():
     from taurex_memory_profiler.outputs import Check, DatasetDiff
 
     saved_fig, saved_produce = plotmod.save_fig, plotmod.produce_retrieval_plots
+    saved_guard = plotmod.has_forward_output
     captured: list = []
     plotmod.save_fig = lambda fig, base: captured.append((fig, base))
+    plotmod.has_forward_output = lambda path: True   # the fixtures are empty files
     try:
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -545,6 +560,7 @@ def test_retrieval_plot_comparison():
             assert not plotmod.compare_retrieval_plots(check, tmp, "baseline", "out2")
     finally:
         plotmod.save_fig, plotmod.produce_retrieval_plots = saved_fig, saved_produce
+        plotmod.has_forward_output = saved_guard
         plt.close("all")
 
 

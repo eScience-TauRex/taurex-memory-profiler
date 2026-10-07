@@ -234,10 +234,11 @@ per-rank smallest/average/largest underneath.*
 limit.*
 
 ![output check](docs/output-check.png)
-*`outputs_<baseline>_vs_<label>.png` — the TauREx plotter output of the two runs
-side by side (posteriors, profiles, contributions, spectrum), so the retrievals
-are compared the way they are read; when the plotter cannot read the output the
-tool reads the HDF5 itself and overlays the values.*
+*`outputs_<baseline>_vs_<label>.png` — the values the retrieval ended on: the
+arrays (SED, pressure profile) overlaid from both runs, then every scalar with a
+dot per run, joined, so agreement and movement are read directly. With a
+completed, non-`--light` retrieval the figure is instead the TauREx plotter
+output of the two runs side by side.*
 
 With `--compare`, every compared run gets its own `memory_<label>.png` and
 `memory_<label>_total.png` first, so each run can be read on its own and the
@@ -394,19 +395,36 @@ so the two retrievals are compared the way they are actually read. The plotter
 figures are kept in `retrieval_<label>/` and reused, so it runs once per output.
 `--no-retrieval-plots` turns this off.
 
-`--all` needs the forward `Output` group, which a `--light` run does not write;
-the tool then tries each plot on its own and keeps whatever can be drawn, and if
-nothing can be drawn it says so and falls back to reading the HDF5 itself: a thin
-roster bar (identical / within the tolerance / outside it / structural) over one
-panel per dataset that carries values — arrays such as the pressure profile or
-the SED overlaid from both runs with their `max|Δ|` (or their two lengths), and
-the scalar parameters on a parity panel where a point on the dashed diagonal
-means the two runs agree.
+These runs are stopped on purpose — a memory experiment kills them at a chosen
+point — so there is no *finished* retrieval for `taurex-plot` to draw. What the
+run did write is the model it ended on, and that is what the figure compares:
+the **values at the end of the retrieval**.
 
-Differences with no numeric value — a shape or dtype change — cannot be drawn,
-so they are named in the caption and counted in the verdict. A truncated or
-unreadable output has nothing to draw, so the figure is skipped and only the
-`unreadable output` line is reported.
+* the arrays it ended on — pressure profile, SED, chemistry ratio — are overlaid
+  from both runs, with their `max|Δ|` (or their two lengths, when they differ);
+* every scalar value gets a row: one dot per run on a shared (log) axis, joined,
+  so two dots on top of each other are a value the two builds agree on and a long
+  connector is a value the fix moved.
+
+`--values-fallback` is what asks for this figure; without it the tool only
+reports that the plotter cannot read the outputs, and prints how to get the
+TauREx plots instead.
+
+### If you do want the TauREx plotter comparison
+
+`taurex-plot --all` needs the forward `Output` group, which `--light` does not
+write, and it needs a retrieval that *ran to the end*. For a run that is meant
+to finish, drop `--light` (in `submit.sh`: `LIGHT=0 ./submit.sh 2 64 50`) and the
+tool runs
+
+```
+taurex-plot -i <output> -o retrieval_<label>/ --all
+```
+
+then puts the same TauREx plot of the two runs side by side. The plotter writes
+PDFs, which the tool rasterises with `pdftoppm`/`pdftocairo`/`convert` (poppler
+or ImageMagick); the pages are kept in `retrieval_<label>/` and reused, so it
+runs once per output.
 
 ### Read the comparison
 

@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 from fnmatch import fnmatch
 import re
+import shutil
 import subprocess
 import sys
 import warnings
@@ -915,11 +916,13 @@ for extra in attempts:
 """
 
 
-def looks_like_retrieval(path: Path) -> bool:
-    """True for a TauREx retrieval output, which is what the plotter reads.
+def has_forward_output(path: Path) -> bool:
+    """True when the output has the forward ``Output`` group the plotter reads.
 
-    Checked before shelling out so a plain HDF5 (or a text file) never pays for
-    importing TauREx twice over.
+    Checked before shelling out, so a file the plotter cannot draw — a ``--light``
+    run writes ``ModelParameters`` and nothing else — costs nothing: without it
+    every one of the plotter's flags fails, and starting it means paying for a
+    TauREx import first.
     """
     try:
         import h5py
@@ -927,7 +930,7 @@ def looks_like_retrieval(path: Path) -> bool:
         return False
     try:
         with h5py.File(path, "r") as handle:
-            return "ModelParameters" in handle or "Output" in handle
+            return "Output" in handle
     except OSError:
         return False
 
@@ -937,32 +940,62 @@ def taurex_plot_command(input_file: Path, outdir: Path) -> list[str]:
     return [sys.executable, "-c", RETRIEVAL_PLOTTER, str(input_file), str(outdir)]
 
 
-def produce_retrieval_plots(input_file: Path, outdir: Path) -> list[Path]:
-    """Draw a retrieval with the TauREx plotter; return the figures it wrote.
+def rasterize_pdf(pdf: Path) -> Path | None:
+    """PDF -> PNG, so the plotter's page can be composed into the montage.
 
-    `--all` is tried first, then each flag on its own: an output written with
-    `--light` has no forward `Output` group, so parts of the plotter abort and
-    whatever it still manages to draw is kept. The directory is reused, so the
-    plotter runs once per output.
+    The TauREx plotter always writes PDF, which cannot be read back by
+    matplotlib directly; a poppler or ImageMagick rasteriser is used for that.
     """
-    if not looks_like_retrieval(input_file):
+    target = pdf.with_suffix(".png")
+    if target.is_file():
+        return target
+    for command in (["pdftoppm", "-png", "-r", "110", "-singlefile", str(pdf),
+                     str(target.with_suffix(""))],
+                    ["pdftocairo", "-png", "-singlefile", str(pdf),
+                     str(target.with_suffix(""))],
+                    ["convert", "-density", "110", str(pdf), str(target)]):
+        if shutil.which(command[0]) is None:
+            continue
+        try:
+            subprocess.run(command, capture_output=True, text=True, check=False)
+        except OSError:
+            continue
+        if target.is_file():
+            return target
+    return None
+
+
+def produce_retrieval_plots(input_file: Path, outdir: Path) -> list[Path]:
+    """Draw a retrieval with the TauREx plotter; return rasterised page paths.
+
+    `--all` is tried first, then each plot on its own: an output that has the
+    ``Output`` group but is missing something a particular plot needs would
+    otherwise lose every plot. The plotter writes PDFs into `outdir`, which are
+    then rasterised next to them; the directory is reused, so the plotter runs
+    once per output.
+    """
+    if not has_forward_output(input_file):
         return []
     outdir.mkdir(parents=True, exist_ok=True)
-    figures = sorted(outdir.glob("*.png"))
-    if figures:
-        return figures
-    try:
-        proc = subprocess.run(taurex_plot_command(input_file, outdir),
-                              capture_output=True, text=True, check=False)
-    except OSError as exc:
-        print(f"  TauREx plotter could not be started: {exc}")
-        return []
-    figures = sorted(outdir.glob("*.png"))
-    if not figures:
-        detail = proc.stderr.strip().splitlines()
-        print(f"  TauREx plotter drew nothing for {input_file.name}"
-              + (f": {detail[-1]}" if detail else ""))
-    return figures
+    pages = sorted(outdir.glob("*.pdf"))
+    if not pages:
+        try:
+            proc = subprocess.run(taurex_plot_command(input_file, outdir),
+                                  capture_output=True, text=True, check=False)
+        except OSError as exc:
+            print(f"  TauREx plotter could not be started: {exc}")
+            return []
+        pages = sorted(outdir.glob("*.pdf"))
+        if not pages:
+            detail = proc.stderr.strip().splitlines()
+            print(f"  TauREx plotter drew nothing for {input_file.name}"
+                  + (f": {detail[-1]}" if detail else ""))
+            return []
+    rasters = [path for page in pages if (path := rasterize_pdf(page)) is not None]
+    if pages and not rasters:
+        print("  PDFs were drawn but no rasteriser is available to compose them "
+              "(install poppler-utils or ImageMagick)")
+    return sorted(rasters)
 
 
 def plot_retrieval_comparison(pages, base: Path, labels, max_rows: int = 6):
@@ -1001,6 +1034,14 @@ def compare_retrieval_plots(check, out_root: Path, base_label: str,
                             name: str) -> bool:
     """Build the outputs figure from the TauREx plotter. False if unavailable."""
     if check.path is None or check.baseline is None:
+        return False
+    missing = [path.name for path in (check.baseline, check.path)
+               if not has_forward_output(path)]
+    if missing:
+        print(f"  no retrieval-plot comparison: {', '.join(missing)} has no "
+              f"'Output' group, which a --light run does not write")
+        print("    re-run the retrieval without --light to get the TauREx plots, "
+              "or pass --values-fallback to compare the values instead")
         return False
     figures = {}
     for label, path in ((base_label, check.baseline), (check.label, check.path)):
@@ -1072,67 +1113,63 @@ def _value_panel(ax, name: str, a: np.ndarray, b: np.ndarray, other_label: str):
                     xycoords="axes fraction", ha="right", fontsize=8.5, color=OOM_RED)
 
 
-def _scalar_panel(ax, scalars, other_label: str):
-    """Parity plot of the scalar parameters: on the diagonal means identical."""
-    values_a = np.array([float(a) for _n, a, _b in scalars])
-    values_b = np.array([float(b) for _n, _a, b in scalars])
-    log = bool(np.all(values_a > 0) and np.all(values_b > 0)
-               and values_a.max() / values_a.min() > 1e3)
-    lo = min(values_a.min(), values_b.min())
-    hi = max(values_a.max(), values_b.max())
+def _final_value_panel(ax, scalars, base_label: str, other_label: str):
+    """The values the retrieval ended on, both runs, parameter by parameter.
+
+    One row per parameter: the value of each run is a dot, joined so the pair is
+    read as one comparison — two dots on top of each other mean the runs finished
+    on the same value, a long connector is a parameter the fix moved.
+    """
+    base = np.array([float(value) for _name, value, _ in scalars])
+    other = np.array([float(value) for _name, _, value in scalars])
+    positive = bool(np.all(base > 0) and np.all(other > 0))
+    log = positive and base.max() / max(base.min(), 1e-300) > 1e3
+
+    positions = np.arange(len(scalars))[::-1]
+    for position, left, right in zip(positions, base, other):
+        ax.plot([left, right], [position, position], color=GRID, lw=1.6, zorder=1)
+    ax.scatter(base, positions, s=30, color=BLUE, zorder=3, label=base_label)
+    ax.scatter(other, positions, s=30, color=ORANGE, zorder=3, label=other_label)
+
     if log:
         ax.set_xscale("log")
-        ax.set_yscale("log")
-        lo, hi = lo / 3, hi * 3
-    if hi <= lo:                     # one parameter, or all of them equal
-        pad = abs(lo) * 0.25 or 1.0
-        lo, hi = lo - pad, hi + pad
-    ax.plot([lo, hi], [lo, hi], color=MUTED, ls="--", lw=1.1, zorder=1)
-    ax.scatter(values_a, values_b, s=18, color=BLUE, zorder=3)
-    style(ax, f"{len(scalars)} scalar parameters", xlabel="baseline",
-          ylabel=other_label)
-    ax.set_xlim(lo, hi)
-    ax.set_ylim(lo, hi)
-    offset = int(np.argmax(np.abs(values_b - values_a))) if scalars else 0
-    if scalars and not np.array_equal(values_a, values_b):
-        ax.annotate(output_name(scalars[offset][0], 34),
-                    (values_a[offset], values_b[offset]), xytext=(6, -10),
-                    textcoords="offset points", fontsize=8, color=OOM_RED)
-    ax.annotate(f"{len(scalars)} identical" if np.array_equal(values_a, values_b)
-                else "off the dashed line = different",
-                (0.995, 0.04), xycoords="axes fraction", ha="right",
-                fontsize=8.5, color=AQUA if np.array_equal(values_a, values_b) else OOM_RED)
+    ax.set_yticks(positions)
+    ax.set_yticklabels([output_name(name, 40) for name, _a, _b in scalars],
+                       fontsize=7.5, color=INK2)
+    ax.set_ylim(-0.8, len(scalars) - 0.2)
+    style(ax, f"{len(scalars)} values at the end of the retrieval",
+          xlabel="value (log scale)" if log else "value")
+    ax.legend(fontsize=8.5, frameon=False, labelcolor=INK2, loc="lower right")
+
+    finite = np.isfinite(base) & np.isfinite(other)
+    changed = int(np.sum(finite & (base != other)))
+    ax.annotate(f"{len(scalars) - changed} identical, {changed} different",
+                (0.995, 1.02), xycoords="axes fraction", ha="right", va="bottom",
+                fontsize=8.5, color=AQUA if not changed else OOM_RED)
 
 
 def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
-    """Compare the two runs' outputs *by value*: overlay the quantities.
+    """Compare the values the two runs ended on, quantity by quantity.
 
-    A thin roster bar says how the datasets split (identical / within the
-    tolerance / outside it / structural), then the body of the figure is the
-    data itself, one panel per dataset that carries values:
+    These runs are stopped on purpose, so there is no finished retrieval for
+    ``taurex-plot`` to draw; what the run did write is the model it ended on, and
+    that is what this figure compares:
 
-    * arrays (pressure profiles, SEDs, spectra, posteriors) are overlaid from
-      both runs, so the shapes and the differences are visible directly;
-    * the scalar parameters share a parity panel, where a point on the dashed
-      diagonal means the two runs agree on that parameter.
+    * the arrays it ended on — pressure profile, SED, chemistry ratio — are
+      overlaid from both runs, so the shapes are read against each other;
+    * every scalar value gets a row: one dot per run on a shared axis, joined, so
+      two dots on top of each other mean the runs agree and a long connector is a
+      value the other build changed.
 
     Differences that have no numeric value — a shape or dtype change — cannot be
     drawn and are named in the caption and the verdict.
     """
     measured = [d for d in check.datasets if d.rel is not None]
-    changed = [d for d in measured if d.rel]     # moved at all, pass or fail
     failing = [d for d in measured if not d.same]
     structural = structural_messages(check)      # shape/dtype: nothing to plot
-    identical = len(measured) - len(changed)
     largest = max((d.rel for d in measured), default=None)
 
-    roster = [("identical", identical, BAND),
-              ("within rtol", len(changed) - len(failing), BLUE),
-              ("outside rtol", len(failing), OOM_RED),
-              ("structural", len(structural), ORANGE)]
-    roster = [row for row in roster if row[1]]
-
-    # --- figure: a roster strip, then one panel per dataset with values ----
+    # --- figure: the values the retrieval ended on, one panel per quantity ---
     arrays, scalars = ([], [])
     if check.kind == "hdf5" and check.baseline is not None and check.path is not None:
         arrays, scalars = _numeric_datasets(check.baseline, check.path)
@@ -1140,40 +1177,34 @@ def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
     panels = len(arrays) + (1 if scalars else 0)
     columns = 2
     rows = max(1, -(-panels // columns))          # ceil
-    fig = plt.figure(figsize=(13, 2.0 + 3.0 * (1 + rows)))
-    gs = fig.add_gridspec(1 + rows, columns, height_ratios=[0.55] + [3.0] * rows,
-                          hspace=0.75, wspace=0.22)
+    fig = plt.figure(figsize=(13, 2.2 + 3.2 * rows))
+    gs = fig.add_gridspec(rows, columns, hspace=0.45, wspace=0.28)
     fig.patch.set_facecolor("#fcfcfb")
 
-    # the roster: a one-glance split of how the compared datasets behaved
-    head = fig.add_subplot(gs[0, :])
-    positions = np.arange(len(roster))[::-1]
-    head.barh(positions, [row[1] for row in roster],
-              color=[row[2] for row in roster], height=0.62)
-    for position, (_label, count, color) in zip(positions, roster):
-        head.annotate(str(count), (count, position), xytext=(4, 0),
-                      textcoords="offset points", va="center", fontsize=8.5,
-                      color=color)
-    head.set_yticks(positions)
-    head.set_yticklabels([row[0] for row in roster], fontsize=9, color=INK2)
-    head.set_xticks([])
-    head.set_xlim(0, max(row[1] for row in roster) * 1.25)
-    head.grid(False)
-    for side in ("top", "right", "left", "bottom"):
-        head.spines[side].set_visible(False)
-    head.set_title(f"Output check: {check.label} vs {baseline_label}",
-                   color=INK, fontsize=11, loc="left")
-
-    # the body: the quantities themselves, overlaid, then the parameters
     drawn = 0
     for name, a, b in arrays:
-        _value_panel(fig.add_subplot(gs[1 + drawn // columns, drawn % columns]),
+        _value_panel(fig.add_subplot(gs[drawn // columns, drawn % columns]),
                      name, a, b, check.label)
         drawn += 1
     if scalars:
-        _scalar_panel(fig.add_subplot(gs[1 + drawn // columns, drawn % columns]),
-                      scalars, check.label)
+        _final_value_panel(fig.add_subplot(gs[drawn // columns, drawn % columns]),
+                           scalars, baseline_label, check.label)
         drawn += 1
+
+    if not drawn:
+        # nothing with a value to show (a byte comparison, all-text datasets)
+        body = fig.add_subplot(gs[:, :])
+        body.axis("off")
+        if check.same:
+            body.text(0.005, 0.9, "the compared outputs are identical", va="top",
+                      fontsize=12, fontweight="bold", color=AQUA)
+        else:
+            body.text(0.005, 0.9, "no numeric value to compare", va="top",
+                      fontsize=12, fontweight="bold", color=INK2)
+            lines = (check.diffs + check.notes)[:6]
+            if lines:
+                body.text(0.005, 0.6, "\n".join(f"\u2022 {line}" for line in lines),
+                          va="top", fontsize=9.5, color=OOM_RED, family="monospace")
 
     problems = []
     if failing:
@@ -1188,30 +1219,15 @@ def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
         verdict = f"\u2717 {', '.join(problems)}"
     if largest is not None:
         verdict += f"   |   largest {largest:.3g}"
-    head.annotate(verdict, (1.0, 1.05), xycoords="axes fraction", ha="right",
-                  va="bottom", fontsize=10.5, fontweight="bold",
-                  color=AQUA if not problems else OOM_RED)
-
-    if not drawn:
-        # nothing with a value to show (a byte comparison, all-text datasets)
-        body = fig.add_subplot(gs[1:, :])
-        body.axis("off")
-        if check.same:
-            body.text(0.005, 0.9, "the compared outputs are identical", va="top",
-                      fontsize=12, fontweight="bold", color=AQUA)
-        else:
-            body.text(0.005, 0.9, "no numeric dataset to compare", va="top",
-                      fontsize=12, fontweight="bold", color=INK2)
-            lines = (check.diffs + check.notes)[:6]
-            if lines:
-                body.text(0.005, 0.6, "\n".join(f"\u2022 {line}" for line in lines),
-                          va="top", fontsize=9.5, color=OOM_RED, family="monospace")
+    fig.suptitle(f"Output check: {check.label} vs {baseline_label}        {verdict}",
+                 color=INK if not problems else OOM_RED, fontsize=11.5, x=0.01,
+                 ha="left")
 
     caption = [f"{check.path.name} vs {check.baseline.name}"]
     if arrays:
-        caption.append(f"{len(arrays)} datasets with values overlaid")
+        caption.append(f"{len(arrays)} arrays overlaid")
     if structural:
-        caption.append("structural: " + "; ".join(structural[:2]))
+        caption.append("not plottable: " + "; ".join(structural[:2]))
     fig.text(0.01, 0.008, " — ".join(caption), fontsize=8.5, color=MUTED, va="bottom")
     gs.update(left=0.055, right=0.985, top=0.92, bottom=0.07)
     save_fig(fig, base)
@@ -1440,6 +1456,9 @@ def parse_args(argv=None):
     parser.add_argument("--no-retrieval-plots", action="store_true",
                         help="do not run the TauREx plotter on the outputs; draw "
                              "the values instead")
+    parser.add_argument("--values-fallback", action="store_true",
+                        help="when the TauREx plotter cannot read the outputs, "
+                             "draw the values instead of only reporting it")
     parser.add_argument("--no-check-output", action="store_true",
                         help="do not compare the outputs of the compared runs")
     parser.add_argument("--output-rtol", type=float, default=1e-6,
@@ -1577,12 +1596,15 @@ def main(argv=None):
             if not check.datasets:
                 continue
             stem = out_root / f"outputs_{safe(runs[0].label)}_vs_{safe(check.label)}"
-            # the comparison the retrieval is actually read with: the plots the
-            # TauREx plotter makes of both outputs, side by side
+            # The comparison the retrieval is actually read with: the plots the
+            # TauREx plotter makes of both outputs, side by side. Our own reading
+            # of the HDF5 is only used when it is asked for, either because the
+            # plotter is switched off or because it cannot read the outputs.
             if not args.no_retrieval_plots and compare_retrieval_plots(
                     check, out_root, runs[0].label, stem.name):
                 continue
-            plot_output_check(check, stem, args.output_rtol, runs[0].label)
+            if args.no_retrieval_plots or args.values_fallback:
+                plot_output_check(check, stem, args.output_rtol, runs[0].label)
 
     # --compare also draws each run on its own, so the runs are readable one by
     # one before they are overlaid.
