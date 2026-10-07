@@ -1059,17 +1059,29 @@ def compare_retrieval_plots(check, out_root: Path, base_label: str,
     return True
 
 
-def _numeric_datasets(path_a: Path, path_b: Path, max_arrays: int = 6):
-    """Read the numeric datasets of two outputs, biggest arrays first.
+def _single(value) -> float | None:
+    """A dataset that holds exactly one number, as a float; None when it is not.
 
-    Returns ``(arrays, scalars)``, each a list of ``(name, baseline, other)``.
-    Arrays are what carries the physics (a pressure profile, an SED, a spectrum)
-    and are what the figure overlays; the scalars are the parameters, which are
-    compared point by point on a parity panel.
+    A ``ModelParameters`` leaf can be written as a scalar or as a one-element
+    array, and both are "one value" for this figure.
+    """
+    array = np.asarray(value)
+    if array.size != 1:
+        return None
+    number = float(array.reshape(-1)[0])
+    return number if np.isfinite(number) else None
+
+
+def _final_values(path_a: Path, path_b: Path):
+    """The single-number values both outputs ended on, as ``(name, a, b)``.
+
+    Every leaf of ``ModelParameters`` is one quantity the retrieval settled on,
+    which is what can be compared between two runs that were stopped before they
+    finished.
     """
     import h5py
 
-    arrays, scalars = [], []
+    values = []
     with h5py.File(path_a, "r") as fa, h5py.File(path_b, "r") as fb:
         names: list[str] = []
         fa.visititems(lambda n, o: names.append(n)
@@ -1080,131 +1092,96 @@ def _numeric_datasets(path_a: Path, path_b: Path, max_arrays: int = 6):
             data_a, data_b = fa[name], fb[name]
             if data_a.dtype.kind not in "fiub" or data_b.dtype.kind not in "fiub":
                 continue
-            a, b = np.asarray(data_a[()]), np.asarray(data_b[()])
-            if a.ndim > 2 or b.ndim > 2:
-                continue
-            (arrays if a.ndim >= 1 else scalars).append((name, a, b))
-    # the largest arrays are the informative ones; the scalars all fit one panel
-    arrays.sort(key=lambda item: item[1].size, reverse=True)
-    return arrays[:max_arrays], scalars
+            a, b = _single(data_a[()]), _single(data_b[()])
+            if a is not None and b is not None:
+                values.append((name, a, b))
+    return values
 
 
-def _value_panel(ax, name: str, a: np.ndarray, b: np.ndarray, other_label: str):
-    """Overlay the values of one dataset from both runs."""
-    if a.ndim <= 1:
-        series = [(a, b)]
-    else:  # 2D: one line per column, a handful at most to stay readable
-        columns = min(a.shape[1], b.shape[1], 8)
-        series = [(a[:, i], b[:, i]) for i in range(columns)]
-    for a_col, b_col in series:
-        ax.plot(np.arange(a_col.size), a_col, color=BLUE, lw=1.2)
-        ax.plot(np.arange(b_col.size), b_col, color=ORANGE, lw=1.2)
-    style(ax, output_name(name, 46), ylabel="value")
-    ax.set_xlabel("index", color=INK2, fontsize=9)
-    ax.legend(handles=[plt.Line2D([], [], color=BLUE, lw=2, label="baseline"),
-                       plt.Line2D([], [], color=ORANGE, lw=2, label=other_label)],
-              fontsize=8, frameon=False, labelcolor=INK2)
-    if a.shape == b.shape:
-        worst = float(np.max(np.abs(a.astype("f8") - b.astype("f8")))) if a.size else 0.0
-        ax.annotate(f"max|Δ| {worst:.3g}", (0.995, 0.04), xycoords="axes fraction",
-                    ha="right", fontsize=8.5, color=MUTED)
-    else:
-        ax.annotate(f"different lengths: {a.size} vs {b.size}", (0.995, 0.04),
-                    xycoords="axes fraction", ha="right", fontsize=8.5, color=OOM_RED)
+def _final_value_panel(ax, values, base_label: str, other_label: str):
+    """One row per value: a dot for each run, joined, the two values labelled."""
+    base = np.array([v for _n, v, _ in values])
+    other = np.array([v for _n, _, v in values])
+    log = bool(np.all(base > 0) and np.all(other > 0)
+               and base.max() / max(base.min(), 1e-300) > 1e3)
 
-
-def _final_value_panel(ax, scalars, base_label: str, other_label: str):
-    """The values the retrieval ended on, both runs, parameter by parameter.
-
-    One row per parameter: the value of each run is a dot, joined so the pair is
-    read as one comparison — two dots on top of each other mean the runs finished
-    on the same value, a long connector is a parameter the fix moved.
-    """
-    base = np.array([float(value) for _name, value, _ in scalars])
-    other = np.array([float(value) for _name, _, value in scalars])
-    positive = bool(np.all(base > 0) and np.all(other > 0))
-    log = positive and base.max() / max(base.min(), 1e-300) > 1e3
-
-    positions = np.arange(len(scalars))[::-1]
+    positions = np.arange(len(values))[::-1]
     for position, left, right in zip(positions, base, other):
-        ax.plot([left, right], [position, position], color=GRID, lw=1.6, zorder=1)
-    ax.scatter(base, positions, s=30, color=BLUE, zorder=3, label=base_label)
-    ax.scatter(other, positions, s=30, color=ORANGE, zorder=3, label=other_label)
-
+        ax.plot([left, right], [position, position], color=GRID, lw=1.8, zorder=1)
+    # The baseline is a wide translucent dot and the other run a small solid one
+    # on top, so a value both runs agree on reads as a concentric pair instead of
+    # one dot hiding the other; a value that moved reads as two dots apart.
+    ax.scatter(base, positions, s=150, marker="o", facecolors=BLUE, alpha=0.35,
+               edgecolors=BLUE, linewidths=1.1, zorder=3, label=base_label)
+    ax.scatter(other, positions, s=34, marker="o", color=ORANGE, alpha=1.0,
+               zorder=4, label=other_label)
     if log:
         ax.set_xscale("log")
-    ax.set_yticks(positions)
-    ax.set_yticklabels([output_name(name, 40) for name, _a, _b in scalars],
-                       fontsize=7.5, color=INK2)
-    ax.set_ylim(-0.8, len(scalars) - 0.2)
-    style(ax, f"{len(scalars)} values at the end of the retrieval",
-          xlabel="value (log scale)" if log else "value")
-    ax.legend(fontsize=8.5, frameon=False, labelcolor=INK2, loc="lower right")
 
-    finite = np.isfinite(base) & np.isfinite(other)
-    changed = int(np.sum(finite & (base != other)))
-    ax.annotate(f"{len(scalars) - changed} identical, {changed} different",
-                (0.995, 1.02), xycoords="axes fraction", ha="right", va="bottom",
-                fontsize=8.5, color=AQUA if not changed else OOM_RED)
+    ax.set_yticks(positions)
+    ax.set_yticklabels([output_name(name, 46) for name, _a, _b in values],
+                       fontsize=8.5, color=INK2)
+    ax.set_ylim(-0.8, len(values) - 0.2)
+    style(ax, f"{len(values)} values at the end of the retrieval",
+          xlabel="value (log scale)" if log else "value")
+    ax.legend(fontsize=9, frameon=False, labelcolor=INK2, loc="lower right",
+              scatterpoints=1, handletextpad=0.6,
+              title="overlapping dots = same value",
+              title_fontsize=8.5)
+
+    differing = [index for index in range(len(values)) if base[index] != other[index]]
+    for index in differing:
+        ax.annotate(f"{fmt_value(base[index])} → {fmt_value(other[index])}",
+                    (max(base[index], other[index]), positions[index]),
+                    xytext=(6, 0), textcoords="offset points", va="center",
+                    fontsize=8, color=OOM_RED)
+    ax.annotate(f"{len(values) - len(differing)} identical, {len(differing)} different",
+                (0.995, 1.01), xycoords="axes fraction", ha="right", va="bottom",
+                fontsize=9, fontweight="bold",
+                color=AQUA if not differing else OOM_RED)
 
 
 def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
-    """Compare the values the two runs ended on, quantity by quantity.
+    """The values the two runs ended on, one row per value.
 
     These runs are stopped on purpose, so there is no finished retrieval for
-    ``taurex-plot`` to draw; what the run did write is the model it ended on, and
-    that is what this figure compares:
+    ``taurex-plot`` to draw. What the run did write is the model it ended on, and
+    that is what this figure compares: every value gets a row, with one dot per
+    run on a shared axis joined by a connector — two dots on top of each other
+    mean the two builds ended on the same value, a long connector is a value the
+    other build moved. The rows that differ are labelled with both values.
 
-    * the arrays it ended on — pressure profile, SED, chemistry ratio — are
-      overlaid from both runs, so the shapes are read against each other;
-    * every scalar value gets a row: one dot per run on a shared axis, joined, so
-      two dots on top of each other mean the runs agree and a long connector is a
-      value the other build changed.
-
-    Differences that have no numeric value — a shape or dtype change — cannot be
-    drawn and are named in the caption and the verdict.
+    Differences with no numeric value — a shape or dtype change — cannot be
+    drawn, so they are named in the caption and counted in the verdict.
     """
     measured = [d for d in check.datasets if d.rel is not None]
     failing = [d for d in measured if not d.same]
     structural = structural_messages(check)      # shape/dtype: nothing to plot
     largest = max((d.rel for d in measured), default=None)
 
-    # --- figure: the values the retrieval ended on, one panel per quantity ---
-    arrays, scalars = ([], [])
+    values = []
     if check.kind == "hdf5" and check.baseline is not None and check.path is not None:
-        arrays, scalars = _numeric_datasets(check.baseline, check.path)
+        values = _final_values(check.baseline, check.path)
 
-    panels = len(arrays) + (1 if scalars else 0)
-    columns = 2
-    rows = max(1, -(-panels // columns))          # ceil
-    fig = plt.figure(figsize=(13, 2.2 + 3.2 * rows))
-    gs = fig.add_gridspec(rows, columns, hspace=0.45, wspace=0.28)
+    rows = len(values)
+    fig, ax = plt.subplots(figsize=(12, max(4.2, 1.6 + 0.36 * rows)))
     fig.patch.set_facecolor("#fcfcfb")
 
-    drawn = 0
-    for name, a, b in arrays:
-        _value_panel(fig.add_subplot(gs[drawn // columns, drawn % columns]),
-                     name, a, b, check.label)
-        drawn += 1
-    if scalars:
-        _final_value_panel(fig.add_subplot(gs[drawn // columns, drawn % columns]),
-                           scalars, baseline_label, check.label)
-        drawn += 1
-
-    if not drawn:
-        # nothing with a value to show (a byte comparison, all-text datasets)
-        body = fig.add_subplot(gs[:, :])
-        body.axis("off")
+    if rows:
+        _final_value_panel(ax, values, baseline_label, check.label)
+    else:
+        # a byte comparison, an unreadable output, or nothing numeric to show
+        ax.axis("off")
         if check.same:
-            body.text(0.005, 0.9, "the compared outputs are identical", va="top",
-                      fontsize=12, fontweight="bold", color=AQUA)
+            ax.text(0.005, 0.9, "the compared outputs are identical", va="top",
+                    fontsize=12, fontweight="bold", color=AQUA)
         else:
-            body.text(0.005, 0.9, "no numeric value to compare", va="top",
-                      fontsize=12, fontweight="bold", color=INK2)
+            ax.text(0.005, 0.9, "no numeric value to compare", va="top",
+                    fontsize=12, fontweight="bold", color=INK2)
             lines = (check.diffs + check.notes)[:6]
             if lines:
-                body.text(0.005, 0.6, "\n".join(f"\u2022 {line}" for line in lines),
-                          va="top", fontsize=9.5, color=OOM_RED, family="monospace")
+                ax.text(0.005, 0.6, "\n".join(f"\u2022 {line}" for line in lines),
+                        va="top", fontsize=9.5, color=OOM_RED, family="monospace")
 
     problems = []
     if failing:
@@ -1219,17 +1196,16 @@ def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
         verdict = f"\u2717 {', '.join(problems)}"
     if largest is not None:
         verdict += f"   |   largest {largest:.3g}"
-    fig.suptitle(f"Output check: {check.label} vs {baseline_label}        {verdict}",
+    fig.suptitle(f"Values at the end of the retrieval — {check.label} vs "
+                 f"{baseline_label}        {verdict}",
                  color=INK if not problems else OOM_RED, fontsize=11.5, x=0.01,
                  ha="left")
 
     caption = [f"{check.path.name} vs {check.baseline.name}"]
-    if arrays:
-        caption.append(f"{len(arrays)} arrays overlaid")
     if structural:
         caption.append("not plottable: " + "; ".join(structural[:2]))
     fig.text(0.01, 0.008, " — ".join(caption), fontsize=8.5, color=MUTED, va="bottom")
-    gs.update(left=0.055, right=0.985, top=0.92, bottom=0.07)
+    fig.tight_layout(rect=(0, 0.035, 1, 0.95))
     save_fig(fig, base)
 
 

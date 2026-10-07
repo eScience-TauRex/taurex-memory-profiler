@@ -234,11 +234,11 @@ per-rank smallest/average/largest underneath.*
 limit.*
 
 ![output check](docs/output-check.png)
-*`outputs_<baseline>_vs_<label>.png` — the values the retrieval ended on: the
-arrays (SED, pressure profile) overlaid from both runs, then every scalar with a
-dot per run, joined, so agreement and movement are read directly. With a
-completed, non-`--light` retrieval the figure is instead the TauREx plotter
-output of the two runs side by side.*
+*`outputs_<baseline>_vs_<label>.png` — the values the retrieval ended on: one row
+per value, a wide translucent dot for the baseline and a small solid dot for the
+other run on top, so overlapping dots are a value the two builds agree on and two
+dots apart are a value the fix moved. With a completed, non-`--light` retrieval
+the figure is instead the TauREx plotter output of the two runs side by side.*
 
 With `--compare`, every compared run gets its own `memory_<label>.png` and
 `memory_<label>_total.png` first, so each run can be read on its own and the
@@ -398,13 +398,14 @@ figures are kept in `retrieval_<label>/` and reused, so it runs once per output.
 These runs are stopped on purpose — a memory experiment kills them at a chosen
 point — so there is no *finished* retrieval for `taurex-plot` to draw. What the
 run did write is the model it ended on, and that is what the figure compares:
-the **values at the end of the retrieval**.
+the **values at the end of the retrieval**, one row per value.
 
-* the arrays it ended on — pressure profile, SED, chemistry ratio — are overlaid
-  from both runs, with their `max|Δ|` (or their two lengths, when they differ);
-* every scalar value gets a row: one dot per run on a shared (log) axis, joined,
-  so two dots on top of each other are a value the two builds agree on and a long
-  connector is a value the fix moved.
+Every value of `ModelParameters` is a row: the baseline run is a wide translucent
+dot, the other run a small solid one on top, joined by a connector. A value both
+runs ended on the same way reads as a concentric pair (**overlapping dots = same
+value**, as the legend says); a value the other build moved reads as two dots
+apart, labelled with both numbers. The axis is logarithmic so values spanning
+`1e-5 … 1e21` stay comparable.
 
 `--values-fallback` is what asks for this figure; without it the tool only
 reports that the plotter cannot read the outputs, and prints how to get the

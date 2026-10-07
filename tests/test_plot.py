@@ -422,11 +422,11 @@ def test_output_check_same_and_different():
 
 
 def test_output_check_figure_shows_the_values():
-    """The output-check figure overlays the quantities, it is not a text panel.
+    """The output figure is the values the retrieval ended on.
 
-    An array dataset (a profile, an SED) must be drawn once per run so the
-    values can be read against each other, and the scalar parameters must get a
-    parity panel instead of a paragraph.
+    Every single-number value gets a row with one dot per run, joined by a
+    connector; a value that differs is labelled with both numbers. It is not a
+    text panel and not a summary of the differences.
     """
     try:
         import h5py
@@ -463,43 +463,48 @@ def test_output_check_figure_shows_the_values():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
 
-        # a) a profile that moved a little and one scalar we can point at
+        # a) three values, one of which moved
         def small_a(handle, np):
-            handle["profile"] = np.linspace(1.0, 2.0, 40)
-            handle["temperature"] = np.float64(1500.0)
+            handle["T"] = np.float64(1500.0)
+            handle["R"] = np.float64(1.2)
+            handle["mix"] = np.array([1e-5])
 
         def small_b(handle, np):
-            handle["profile"] = np.linspace(1.0, 2.0, 40) * (1 + 1e-5)
-            handle["temperature"] = np.float64(1500.5)
+            handle["T"] = np.float64(1500.5)
+            handle["R"] = np.float64(1.2)
+            handle["mix"] = np.array([1e-5])
 
-        check = check_of(tmp, "small", small_a, small_b, rtol=1e-2)
-        plotmod.plot_output_check(check, tmp / "fig_small", 1e-2, "good")
+        check = check_of(tmp, "small", small_a, small_b, rtol=1e-6)
+        plotmod.plot_output_check(check, tmp / "fig_small", 1e-6, "good")
         fig = captured[-1]
-        overlay = [ax for ax in fig.axes if len(ax.lines) >= 2]
-        parity = [ax for ax in fig.axes if ax.collections]
-        assert overlay, "the profile must be overlaid from both runs"
-        assert parity, "the scalars must get a parity panel"
-        assert len(overlay[0].lines) == 2, "baseline and the other run"
+        assert len(fig.axes) == 1, "the values are the whole figure"
+        ax = fig.axes[0]
+        assert ax.collections, "each run is a set of dots"
+        assert len(ax.get_yticklabels()) == 3, "one row per value"
+        assert len(ax.lines) == 3, "one connector per row"
+        texts = " ".join(t.get_text() for t in ax.texts)
+        assert "1500" in texts, texts          # the moved value is labelled
+        assert "1 identical, 1 different" in texts or "different" in texts, texts
+        assert ax.get_xscale() == "log"
 
-        # b) the profile changed length: the values are still overlaid and the
-        #    mismatch is stated, it is not a text-only figure
+        # b) the values agree, only a shape changed: still a values figure, and
+        #    the structural difference is named instead of silently passing
         def shape_a(handle, np):
+            handle["T"] = np.float64(1500.0)
             handle["profile"] = np.zeros(50)
-            handle["temperature"] = np.float64(1500.0)
 
         def shape_b(handle, np):
+            handle["T"] = np.float64(1500.0)
             handle["profile"] = np.zeros(12)
-            handle["temperature"] = np.float64(1500.0)
 
         check = check_of(tmp, "shape", shape_a, shape_b, rtol=1e-6)
         assert not check.same, check
         plotmod.plot_output_check(check, tmp / "fig_shape", 1e-6, "good")
         fig = captured[-1]
-        assert [ax for ax in fig.axes if len(ax.lines) >= 2], "still overlaid"
-        blob = " ".join(t.get_text() for ax in fig.axes for t in ax.texts)
-        blob += " " + " ".join(t.get_text() for t in fig.texts)
+        assert len(fig.axes) == 1
+        assert fig.axes[0].get_yticklabels(), "the value it did end on is drawn"
+        blob = " ".join(t.get_text() for t in fig.texts)
         blob += " " + (fig.get_suptitle() or "")
-        assert "different lengths" in blob, blob
         assert "shape" in blob, blob            # named in the caption
         assert "structural" in blob, blob       # counted in the verdict
 
