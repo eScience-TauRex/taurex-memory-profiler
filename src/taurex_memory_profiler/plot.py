@@ -1040,8 +1040,8 @@ def compare_retrieval_plots(check, out_root: Path, base_label: str,
     if missing:
         print(f"  no retrieval-plot comparison: {', '.join(missing)} has no "
               f"'Output' group, which a --light run does not write")
-        print("    re-run the retrieval without --light to get the TauREx plots, "
-              "or pass --values-fallback to compare the values instead")
+        print("    (re-run the retrieval without --light for the TauREx plots; "
+              "comparing the values the runs ended on instead)")
         return False
     figures = {}
     for label, path in ((base_label, check.baseline), (check.label, check.path)):
@@ -1111,9 +1111,9 @@ def _final_value_panel(ax, values, base_label: str, other_label: str):
     # The baseline is a wide translucent dot and the other run a small solid one
     # on top, so a value both runs agree on reads as a concentric pair instead of
     # one dot hiding the other; a value that moved reads as two dots apart.
-    ax.scatter(base, positions, s=150, marker="o", facecolors=BLUE, alpha=0.35,
-               edgecolors=BLUE, linewidths=1.1, zorder=3, label=base_label)
-    ax.scatter(other, positions, s=34, marker="o", color=ORANGE, alpha=1.0,
+    ax.scatter(base, positions, s=170, marker="o", facecolors=BLUE, alpha=0.45,
+               edgecolors=BLUE, linewidths=1.6, zorder=3, label=base_label)
+    ax.scatter(other, positions, s=30, marker="o", color=ORANGE, alpha=1.0,
                zorder=4, label=other_label)
     if log:
         ax.set_xscale("log")
@@ -1432,9 +1432,6 @@ def parse_args(argv=None):
     parser.add_argument("--no-retrieval-plots", action="store_true",
                         help="do not run the TauREx plotter on the outputs; draw "
                              "the values instead")
-    parser.add_argument("--values-fallback", action="store_true",
-                        help="when the TauREx plotter cannot read the outputs, "
-                             "draw the values instead of only reporting it")
     parser.add_argument("--no-check-output", action="store_true",
                         help="do not compare the outputs of the compared runs")
     parser.add_argument("--output-rtol", type=float, default=1e-6,
@@ -1579,8 +1576,7 @@ def main(argv=None):
             if not args.no_retrieval_plots and compare_retrieval_plots(
                     check, out_root, runs[0].label, stem.name):
                 continue
-            if args.no_retrieval_plots or args.values_fallback:
-                plot_output_check(check, stem, args.output_rtol, runs[0].label)
+            plot_output_check(check, stem, args.output_rtol, runs[0].label)
 
     # --compare also draws each run on its own, so the runs are readable one by
     # one before they are overlaid.

@@ -407,9 +407,9 @@ value**, as the legend says); a value the other build moved reads as two dots
 apart, labelled with both numbers. The axis is logarithmic so values spanning
 `1e-5 … 1e21` stay comparable.
 
-`--values-fallback` is what asks for this figure; without it the tool only
-reports that the plotter cannot read the outputs, and prints how to get the
-TauREx plots instead.
+This figure is what you get whenever the plotter cannot be used, so
+`taurex-mem-plot --compare a b` always produces it — no extra flag. The tool
+also says why it fell back, and how to get the TauREx plots instead.
 
 ### If you do want the TauREx plotter comparison
 

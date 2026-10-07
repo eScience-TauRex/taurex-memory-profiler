@@ -366,16 +366,16 @@ def test_output_check_same_and_different():
             "label=mem_64_bad\njobid=222\ncommand=taurex -o out_222.hdf5\n")
 
         # the fixtures have no forward 'Output' group, so the TauREx plotter
-        # cannot read them and the figure is only drawn when it is asked for
+        # cannot read them and the values figure is drawn instead
         proc = call([*PLOT, "--logdir", str(logs), "--compare",
                      "mem_64_good", "mem_64_bad", "--no-overview", "--no-total",
                      "--output-dir", str(logs)])
         assert proc.returncode == 0, proc.stderr
         assert "no retrieval-plot comparison" in proc.stdout, proc.stdout
-        assert not (logs / "outputs_mem_64_good_vs_mem_64_bad.png").exists()
+        assert (logs / "outputs_mem_64_good_vs_mem_64_bad.png").is_file()
 
         out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad",
-                       "--report", logs / "report.md", "--values-fallback",
+                       "--report", logs / "report.md",
                        "--output-dir", logs)
         assert "Output check (baseline mem_64_good)" in out, out
         assert "same (2 datasets" in out, out
@@ -387,16 +387,14 @@ def test_output_check_same_and_different():
             handle["profile"] = np.linspace(0.0, 2.0, 50)
             handle["model"] = "tau"
         proc = call([*PLOT, "--logdir", str(logs), "--compare",
-                     "mem_64_good", "mem_64_bad", "--no-overview", "--no-total",
-                     "--values-fallback", "--output-dir", str(logs)])
+                     "mem_64_good", "mem_64_bad", "--no-overview", "--no-total", "--output-dir", str(logs)])
         assert proc.returncode == 0, proc.stderr
         assert "DIFFERENT" in proc.stdout and "profile" in proc.stdout, proc.stdout
 
         # a plain --check-output applies to every run, a LABEL= one to that run
         out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad",
                        "--check-output", "out_111.hdf5",
-                       "--check-output", "mem_64_bad=out_111.hdf5",
-                       "--values-fallback", "--no-overview", "--no-total",
+                       "--check-output", "mem_64_bad=out_111.hdf5", "--no-overview", "--no-total",
                        "--output-dir", logs)
         assert "same (2 datasets" in out, out
 
