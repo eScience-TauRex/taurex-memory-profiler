@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -342,312 +344,99 @@ def test_compare_by_run_name():
         assert "mem_64_nope" in proc.stderr and "available" in proc.stderr
 
 
-def test_output_check_same_and_different():
-    """--compare checks that the compared runs wrote the same output."""
-    try:
-        import h5py
-        import numpy as np
-    except ImportError:
-        print("SKIP test_output_check_same_and_different (no h5py)")
-        return
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-        logs = tmp / "memory_logs"
-        write_unified(logs, job="111", label="mem_64_good")
-        write_unified(logs, job="222", label="mem_64_bad")
-        for job, scale in (("111", 1.0), ("222", 1.0000001)):
-            with h5py.File(tmp / f"out_{job}.hdf5", "w") as handle:
-                handle["profile"] = np.linspace(0.0, scale, 50)
-                handle["model"] = "tau"
-        # the -o of the recorded command is found one directory above the logs
-        (logs / "run_111.meta").write_text(
-            "label=mem_64_good\njobid=111\ncommand=taurex -o out_111.hdf5\n")
-        (logs / "run_222.meta").write_text(
-            "label=mem_64_bad\njobid=222\ncommand=taurex -o out_222.hdf5\n")
+def test_results_comparison_puts_the_runs_side_by_side():
+    """--compare shows the TauREx plots of the results, one row per plot.
 
-        # the fixtures have no forward 'Output' group, so the TauREx plotter
-        # cannot read them and the values figure is drawn instead
-        proc = call([*PLOT, "--logdir", str(logs), "--compare",
-                     "mem_64_good", "mem_64_bad", "--no-overview", "--no-total",
-                     "--output-dir", str(logs)])
-        assert proc.returncode == 0, proc.stderr
-        assert "no retrieval-plot comparison" in proc.stdout, proc.stdout
-        assert (logs / "outputs_mem_64_good_vs_mem_64_bad.png").is_file()
-
-        out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad",
-                       "--report", logs / "report.md",
-                       "--output-dir", logs)
-        assert "Output check (baseline mem_64_good)" in out, out
-        assert "same (2 datasets" in out, out
-        assert (logs / "outputs_mem_64_good_vs_mem_64_bad.png").is_file()
-        assert "## Output check" in (logs / "report.md").read_text()
-
-        # one dataset outside the tolerance is reported with its values
-        with h5py.File(tmp / "out_222.hdf5", "w") as handle:
-            handle["profile"] = np.linspace(0.0, 2.0, 50)
-            handle["model"] = "tau"
-        proc = call([*PLOT, "--logdir", str(logs), "--compare",
-                     "mem_64_good", "mem_64_bad", "--no-overview", "--no-total", "--output-dir", str(logs)])
-        assert proc.returncode == 0, proc.stderr
-        assert "DIFFERENT" in proc.stdout and "profile" in proc.stdout, proc.stdout
-
-        # a plain --check-output applies to every run, a LABEL= one to that run
-        out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad",
-                       "--check-output", "out_111.hdf5",
-                       "--check-output", "mem_64_bad=out_111.hdf5", "--no-overview", "--no-total",
-                       "--output-dir", logs)
-        assert "same (2 datasets" in out, out
-
-        # --no-check-output leaves the comparison alone
-        out = run_plot("--logdir", logs, "--compare", "mem_64_good", "mem_64_bad",
-                       "--no-check-output", "--no-overview", "--no-total",
-                       "--output-dir", logs)
-        assert "Output check" not in out, out
-
-        # a run killed before it finished writing leaves a truncated HDF5 file:
-        # that is reported as a note, the comparison does not die on it
-        with h5py.File(tmp / "out_222.hdf5", "w") as handle:
-            handle["profile"] = np.linspace(0.0, 1.0, 50)
-        with (tmp / "out_222.hdf5").open("r+b") as handle:
-            handle.truncate(96)
-        proc = call([*PLOT, "--logdir", str(logs), "--compare",
-                     "mem_64_good", "mem_64_bad", "--no-overview", "--no-total",
-                     "--report", str(logs / "report.md"), "--output-dir", str(logs)])
-        assert proc.returncode == 0, proc.stderr
-        assert "unreadable output" in proc.stdout, proc.stdout
-        assert "out_111.hdf5 vs out_222.hdf5" in proc.stdout, proc.stdout
-        assert "unreadable output" in (logs / "report.md").read_text()
-
-
-def test_output_check_figure_shows_the_values():
-    """The output figure is the values the retrieval ended on.
-
-    Every single-number value gets a row with one dot per run, joined by a
-    connector; a value that differs is labelled with both numbers. It is not a
-    text panel and not a summary of the differences.
+    The plotter is stubbed: what is checked is the composition — one column per
+    run, one row per page, so the same page of two runs sits in the same row.
     """
     try:
-        import h5py
         import matplotlib
-        import numpy as np
     except ImportError:
-        print("SKIP test_output_check_figure_shows_the_values (no deps)")
-        return
-    matplotlib.use("Agg")
-
-    sys.path.insert(0, str(SRC))
-    from taurex_memory_profiler import plot as plotmod
-    from taurex_memory_profiler.outputs import compare_runs
-
-    class FakeRun:  # compare_runs only reads these three attributes
-        def __init__(self, source, meta, label):
-            self.source, self.meta, self.label = source, meta, label
-
-    def check_of(tmp: Path, name: str, write_a, write_b, rtol: float):
-        for stem, writer in (("a", write_a), ("b", write_b)):
-            with h5py.File(tmp / f"{name}_{stem}.hdf5", "w") as handle:
-                writer(handle, np)
-        runs = [FakeRun(str(tmp), {"label": "good",
-                                   "command": f"taurex -o {name}_a.hdf5"}, "good"),
-                FakeRun(str(tmp), {"label": "bad",
-                                   "command": f"taurex -o {name}_b.hdf5"}, "bad")]
-        checks = compare_runs(runs, {}, rtol=rtol, atol=0.0)
-        assert checks and checks[0].kind == "hdf5", checks
-        return checks[0]
-
-    captured: list = []
-    plotmod.save_fig = lambda fig, base: captured.append(fig)
-
-    with tempfile.TemporaryDirectory() as tmp:
-        tmp = Path(tmp)
-
-        # a) three values, one of which moved
-        def small_a(handle, np):
-            handle["T"] = np.float64(1500.0)
-            handle["R"] = np.float64(1.2)
-            handle["mix"] = np.array([1e-5])
-
-        def small_b(handle, np):
-            handle["T"] = np.float64(1500.5)
-            handle["R"] = np.float64(1.2)
-            handle["mix"] = np.array([1e-5])
-
-        check = check_of(tmp, "small", small_a, small_b, rtol=1e-6)
-        plotmod.plot_output_check(check, tmp / "fig_small", 1e-6, "good")
-        fig = captured[-1]
-        assert len(fig.axes) == 1, "the values are the whole figure"
-        ax = fig.axes[0]
-        assert ax.collections, "each run is a set of dots"
-        assert len(ax.get_yticklabels()) == 3, "one row per value"
-        assert len(ax.lines) == 3, "one connector per row"
-        texts = " ".join(t.get_text() for t in ax.texts)
-        assert "1500" in texts, texts          # the moved value is labelled
-        assert "1 identical, 1 different" in texts or "different" in texts, texts
-        assert ax.get_xscale() == "log"
-
-        # b) the values agree, only a shape changed: still a values figure, and
-        #    the structural difference is named instead of silently passing
-        def shape_a(handle, np):
-            handle["T"] = np.float64(1500.0)
-            handle["profile"] = np.zeros(50)
-
-        def shape_b(handle, np):
-            handle["T"] = np.float64(1500.0)
-            handle["profile"] = np.zeros(12)
-
-        check = check_of(tmp, "shape", shape_a, shape_b, rtol=1e-6)
-        assert not check.same, check
-        plotmod.plot_output_check(check, tmp / "fig_shape", 1e-6, "good")
-        fig = captured[-1]
-        assert len(fig.axes) == 1
-        assert fig.axes[0].get_yticklabels(), "the value it did end on is drawn"
-        blob = " ".join(t.get_text() for t in fig.texts)
-        blob += " " + (fig.get_suptitle() or "")
-        assert "shape" in blob, blob            # named in the caption
-        assert "structural" in blob, blob       # counted in the verdict
-
-    import matplotlib.pyplot as plt
-    for fig in captured:
-        plt.close(fig)
-
-
-def test_output_figure_holds_every_run():
-    """Three compared runs are one figure, each run its own marker.
-
-    The verdict in the title is about the numbers only: a run whose output
-    carries a group the others do not is not a failed comparison, because there
-    is no number to compare there. Only a value outside the tolerance turns the
-    verdict red.
-    """
-    try:
-        import h5py
-        import matplotlib
-        import matplotlib.colors
-        import numpy as np
-    except ImportError:
-        print("SKIP test_output_figure_holds_every_run (no deps)")
-        return
-    matplotlib.use("Agg")
-
-    sys.path.insert(0, str(SRC))
-    from taurex_memory_profiler import plot as plotmod
-    from taurex_memory_profiler.outputs import compare_runs
-
-    class FakeRun:  # compare_runs only reads these three attributes
-        def __init__(self, source, meta, label):
-            self.source, self.meta, self.label = source, meta, label
-
-    def write(name: str, T: float) -> None:
-        with h5py.File(tmp / f"{name}.hdf5", "w") as handle:
-            handle["T"] = np.float64(T)
-            handle["R"] = np.float64(1.2)
-            if name == "third":      # a group only this run wrote
-                handle["Observed"] = np.zeros(4)
-
-    captured: list = []
-    saved = plotmod.save_fig
-    plotmod.save_fig = lambda fig, base: captured.append(fig)
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            tmp = Path(tmpdir)
-            runs = [FakeRun(str(tmp), {"label": label,
-                                       "command": f"taurex -o {label}.hdf5"}, label)
-                    for label in ("good", "other", "third")]
-            for label in ("good", "other", "third"):
-                write(label, 1500.0)
-
-            checks = compare_runs(runs, {}, rtol=1e-6, atol=0.0)
-            assert len(checks) == 2, checks
-            plotmod.plot_output_checks(checks, tmp / "fig", 1e-6,
-                                       ["good", "other", "third"])
-            fig = captured[-1]
-            assert len(fig.axes) == 1, "the values are the whole figure"
-            ax = fig.axes[0]
-            assert len(ax.collections) == 3, "one marker set per run"
-            # the third run is the thin black cross, so it stays visible on top
-            # of the two dots where the three agree
-            edges = [matplotlib.colors.to_hex(c.get_edgecolors()[0])
-                     for c in ax.collections]
-            assert edges[2].lower() == "#0b0b0b", edges
-            assert len(set(edges)) == 3, edges
-            legend = [text.get_text() for text in ax.get_legend().get_texts()]
-            assert legend == ["good", "other", "third"], legend
-            title = fig.get_suptitle()
-            assert "identical" in title, title
-            assert "\u2717" not in title, title       # structure is not a failure
-            assert "1 structural difference" in title, title
-
-            # a value one run moved is the only thing that fails the comparison
-            write("third", 1501.0)
-            checks = compare_runs(runs, {}, rtol=1e-6, atol=0.0)
-            plotmod.plot_output_checks(checks, tmp / "fig2", 1e-6,
-                                       ["good", "other", "third"])
-            fig = captured[-1]
-            title = fig.get_suptitle()
-            assert "\u2717 third: 1 outside rtol" in title, title
-            assert fig.axes[0].collections, "every run is still drawn"
-    finally:
-        plotmod.save_fig = saved
-
-    import matplotlib.pyplot as plt
-    for fig in captured:
-        plt.close(fig)
-
-
-def test_retrieval_plot_comparison():
-    """The outputs figure is built from the TauREx plotter's own figures."""
-    try:
-        import matplotlib
-        import numpy as np
-    except ImportError:
-        print("SKIP test_retrieval_plot_comparison (no matplotlib)")
+        print("SKIP test_results_comparison_puts_the_runs_side_by_side (no matplotlib)")
         return
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     sys.path.insert(0, str(SRC))
     from taurex_memory_profiler import plot as plotmod
-    from taurex_memory_profiler.outputs import Check, DatasetDiff
 
-    saved_fig, saved_produce = plotmod.save_fig, plotmod.produce_retrieval_plots
-    saved_guard = plotmod.has_forward_output
+    saved_fig, saved_plots = plotmod.save_fig, plotmod.result_plots
     captured: list = []
     plotmod.save_fig = lambda fig, base: captured.append((fig, base))
-    plotmod.has_forward_output = lambda path: True   # the fixtures are empty files
     try:
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
-            plots = {}
-            for stem, slope in (("baseline", 1.0), ("other", 1.4)):
+            pages = {}
+            for stem, slope in (("a", 1.0), ("b", 1.4)):
                 (tmp / f"{stem}.hdf5").write_bytes(b"")
                 directory = tmp / f"rp_{stem}"
                 directory.mkdir()
-                for name in ("spectrum.png", "temperature.png"):
+                for name in ("output_spectrum", "output_tp_profile"):
                     fig, ax = plt.subplots(figsize=(2, 1))
                     ax.plot([0, 1], [0, slope])
-                    fig.savefig(directory / name, dpi=50)
+                    fig.savefig(directory / f"{name}.png", dpi=50)
                     plt.close(fig)
-                plots[stem] = directory
-            plotmod.produce_retrieval_plots = \
-                lambda path, outdir: sorted(plots[path.stem].glob("*.png"))
+                pages[stem] = {name: directory / f"{name}.png"
+                               for name in ("output_spectrum", "output_tp_profile")}
+            plotmod.result_plots = lambda path, outdir: pages[path.stem]
 
-            check = Check(label="other", path=tmp / "other.hdf5",
-                          baseline=tmp / "baseline.hdf5", kind="hdf5", total=3,
-                          datasets=[DatasetDiff(name="x", rel=0.0, same=True)],
-                          same=True)
-            assert plotmod.compare_retrieval_plots(check, tmp, "baseline", "out")
+            # the -o recorded in the meta is what is drawn, one file per run
+            runs = [plotmod.Run(label=stem, source=str(tmp),
+                                meta={"command": f"taurex -o {stem}.hdf5"})
+                    for stem in ("a", "b")]
+            plotmod.compare_results(runs, tmp)
             fig, base = captured[-1]
-            assert base.name == "out", base        # save_fig appends .png itself
-            assert len(fig.axes) == 4, "2 TauREx figures x 2 runs"
-            assert [ax.get_title() for ax in fig.axes[0:2]] == ["baseline", "other"]
-
-            # nothing in common (or no figures at all) -> fall back, do not claim
-            plotmod.produce_retrieval_plots = lambda path, outdir: []
-            assert not plotmod.compare_retrieval_plots(check, tmp, "baseline", "out2")
+            assert base.name == "results_a_vs_b", base   # save_fig adds .png
+            assert len(fig.axes) == 4, "2 pages x 2 runs"
+            assert [ax.get_title() for ax in fig.axes[0:2]] == ["a", "b"]
+            assert fig.axes[2].get_title() == "", "the run labels sit on the top row"
     finally:
-        plotmod.save_fig, plotmod.produce_retrieval_plots = saved_fig, saved_produce
-        plotmod.has_forward_output = saved_guard
+        plotmod.save_fig, plotmod.result_plots = saved_fig, saved_plots
         plt.close("all")
+
+
+def test_duplicate_run_names_ask_before_deleting():
+    """Two runs with one name: the plotter keeps both with a note when nobody
+    can be asked, and drops the older one on --delete-old."""
+    with tempfile.TemporaryDirectory() as tmp:
+        logs = Path(tmp) / "memory_logs"
+        write_unified(logs, job="111", label="twice")
+        write_unified(logs, job="222", label="twice")
+
+        # no terminal: both runs stay
+        out = run_plot("--logdir", logs, "--select", "twice", "--output-dir", logs)
+        assert "2 runs are labelled 'twice'" in out, out
+        assert (logs / "run_111.meta").exists() and (logs / "run_222.meta").exists()
+
+        # the older run is the one written first, and only it goes
+        out = run_plot("--logdir", logs, "--select", "twice", "--output-dir", logs,
+                       "--delete-old")
+        assert "Deleted the old run 111" in out, out
+        assert not (logs / "run_111.meta").exists()
+        assert not list(logs.glob("*_111_*.csv"))
+        assert (logs / "run_222.meta").exists()
+        assert (logs / "memory_twice.png").is_file()
+
+
+def test_duplicate_names_are_found_when_one_run_is_picked():
+    """Plotting only the newest run of a name still finds the older namesake:
+    its figures are the ones that would be overwritten."""
+    with tempfile.TemporaryDirectory() as tmp:
+        logs = Path(tmp) / "memory_logs"
+        write_unified(logs, job="111", label="twice")
+        write_unified(logs, job="222", label="twice")
+        old = time.time() - 600
+        for path in logs.glob("*_111_*"):
+            os.utime(path, (old, old))
+
+        # no --select and no --job: the newest job alone, whose name is shared
+        out = run_plot("--logdir", logs, "--output-dir", logs, "--delete-old")
+        assert "Deleted the old run 111" in out, out
+        assert not (logs / "run_111.meta").exists()
+        assert not list(logs.glob("*_111_*.csv"))
+        assert (logs / "run_222.meta").exists()
+        assert (logs / "memory_twice.png").is_file()
 
 
 def main():

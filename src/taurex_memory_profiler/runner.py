@@ -17,6 +17,11 @@ kill), writes ``run_<jobid>.meta``, and prints the command to plot the result.
 **The exit code of the command is returned unchanged**, so ``sbatch`` still
 reports a failed or killed retrieval as such.
 
+The label is the name the plotter knows the run by, so a second run with the same
+label would make two runs of one name: before starting, the runs already
+labelled NAME are deleted — after asking, and only when there is a terminal to
+ask on (``--delete-old``/``--keep-old`` skip the question).
+
 Options:
   -o, --outdir DIR     where the CSVs go                        [memory_logs]
   -i, --interval SEC   sampling interval                        [$MEM_INTERVAL or 5]
@@ -27,6 +32,8 @@ Options:
       --pyspy          also record a py-spy CPU flamegraph
       --pyspy-rate HZ  py-spy sampling rate                     [100]
       --pyspy-out F    py-spy output file                       [profile_<label>.svg]
+      --delete-old     delete the runs that already carry NAME, no question
+      --keep-old       keep them, no question
 
 Environment:
   MEM_INTERVAL  default sampling interval
@@ -51,6 +58,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .monitor import stop_file_path
+from .runs import prune_duplicates
 
 VALUE_OPTIONS = {"-o", "--outdir", "-i", "--interval", "-t", "--threads",
                  "-p", "--pattern", "-j", "--jobid", "-l", "--label",
@@ -110,6 +118,11 @@ def parse_args(argv: "list[str] | None" = None) -> argparse.Namespace:
                         help="py-spy sampling rate in Hz [100]")
     parser.add_argument("--pyspy-out", default="",
                         help="py-spy output file [profile_<label>.svg]")
+    parser.add_argument("--delete-old", dest="old_runs", action="store_const", const="delete",
+                        help="delete the runs that already carry this label, no question")
+    parser.add_argument("--keep-old", dest="old_runs", action="store_const", const="keep",
+                        help="keep them, no question")
+    parser.set_defaults(old_runs=None)
 
     args = parser.parse_args(options)
     if not command:
@@ -230,6 +243,7 @@ def main(argv: "list[str] | None" = None) -> int:
         return 1
 
     outdir.mkdir(parents=True, exist_ok=True)
+    prune_duplicates(outdir, args.label, keep=args.jobid, policy=args.old_runs)
     stop_file_path(outdir, args.jobid).unlink(missing_ok=True)
 
     print("\n".join([

@@ -18,17 +18,16 @@ Two commands, one per side of a run:
 | command | module | role |
 |---|---|---|
 | `taurex-mem-run` | [`runner.py`](./src/taurex_memory_profiler/runner.py) | run any command with the sampler beside it — the one-liner |
-| `taurex-mem-plot` | [`plot.py`](./src/taurex_memory_profiler/plot.py) | all the figures, the text summary and the report |
-| — | [`outputs.py`](./src/taurex_memory_profiler/outputs.py) | the output check of `taurex-mem-plot`: did the compared runs write the same result |
+| `taurex-mem-plot` | [`plot.py`](./src/taurex_memory_profiler/plot.py) | all the figures, the results comparison, the text summary and the report |
 | `python -m taurex_memory_profiler.monitor` | [`monitor.py`](./src/taurex_memory_profiler/monitor.py) | the per-node sampler `taurex-mem-run` starts (also usable standalone) |
 
 `python -m taurex_memory_profiler` is the plotter, so the package is usable even
 without the console scripts on `PATH`.
 
 Requires Python ≥ 3.9 and Linux (`/proc`); `py-spy` only if you want the CPU
-flamegraph, and `h5py` only if the compared runs write HDF5 outputs (the output
-check stops with a clear message when it meets an HDF5 file without `h5py`).
-Everything else (`numpy`, `pandas`, `matplotlib`) comes with the install.
+flamegraph, and `taurex` (for its `taurex-plot`) only if you want the results of
+the runs compared. Everything else (`numpy`, `pandas`, `matplotlib`) comes with
+the install.
 
 ## Install
 
@@ -43,7 +42,6 @@ From a checkout, preferably in a virtual environment:
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e .            # numpy, pandas, matplotlib
 pip install -e ".[pyspy]"   # …plus py-spy, for the CPU flamegraph
-pip install -e ".[hdf5]"    # …plus h5py, to check HDF5 outputs dataset by dataset
 ```
 
 The sampler is started with the **same interpreter** as `taurex-mem-run`, so on a
@@ -124,6 +122,27 @@ taurex-mem-run -l mem_128_good -- mpirun -np 256 taurex -i parfile.par --retriev
 | `--pyspy` | off | also record a py-spy CPU flamegraph |
 | `--pyspy-rate HZ` | `100` | py-spy sampling rate |
 | `--pyspy-out FILE` | `profile_<label>.svg` | py-spy output file |
+| `--delete-old` | off | delete the runs that already carry this label, without asking |
+| `--keep-old` | off | keep them, without asking |
+
+### One name, one run
+
+The label is the name of the run, so starting a second run with a label that is
+already in `--outdir` would leave two runs of one name — and, since the figures
+are named after the label, two runs writing the same files. Before starting,
+`taurex-mem-run` therefore says which runs already carry that label and asks
+whether to delete them:
+
+```
+2 runs are labelled 'mem_64_good' in memory_logs:
+  28469912
+Delete the 1 older one(s), so they do not clutter the plots? [y/N]
+```
+
+Answering `y` removes their CSVs, their `run_<jobid>.meta` and the figures and
+report the plotter named after that label. In a batch job there is no terminal
+to ask on: the runs are kept and the note says so, so a script that must not ask
+can pass `--delete-old` or `--keep-old` and decide up front.
 
 Environment: `MEM_INTERVAL`, `MEM_THREADS` and `MEM_PATTERN` seed the matching
 options, `MEM_RUN_WAIT` sets how long to wait for the first samples (default
@@ -200,14 +219,21 @@ job unless `--job` or `--select` is given.
 | `--per-node` | also draw one line per node |
 | `--top N` | also draw the top-N processes by peak memory |
 | `--per-run` | with several runs, also write the per-run figures (implied by `--compare`) |
-| `--report PATH` | also write a markdown report (peaks, limits, timings, output check) |
+| `--report PATH` | also write a markdown report (peaks, limits, timings) |
 | `--title TEXT` | custom title for the comparison figure |
-| `--check-output [LABEL=]FILE` | override which output file is compared (automatic: the `-o` of each run) |
-| `--no-check-output` | skip that check |
-| `--no-retrieval-plots` | do not run the TauREx plotter on the outputs; draw the values instead |
-| `--output-rtol`, `--output-atol` | tolerances of the output check [1e-06, 0] |
+| `--output [LABEL=]FILE` | the output of a compared run, when it is not the `-o` recorded in `run_<jobid>.meta` |
+| `--no-results` | do not draw the TauREx plots of the results |
 | `--output-dir DIR` | where to write the figures |
 | `--killed` / `--not-killed` | force the OOM marker instead of auto-detecting it |
+| `--delete-old` / `--keep-old` | what to do when several runs share a name: delete the older ones, or keep them, without asking |
+
+Two runs with the same name would write the same figures, so when the name of a
+run appears on another run in its log directory only the most recent one is
+plotted and the older ones are offered for deletion (their logs, their
+`run_<jobid>.meta` and the figures named after that label). That also happens
+when a single job is picked with `--job` or by taking the newest run of the
+directory: the other runs of its name are what would overwrite its figures.
+Without a terminal to ask on the older runs are kept, and the note says so.
 
 ### What you get
 
@@ -217,7 +243,7 @@ the runs come from several directories, or wherever `--output-dir` points:
 * `memory_<label>.png` — overview, one column per node (below).
 * `memory_<label>_total.png` — total memory over time (all ranks, all nodes).
 * `compare_<a>_vs_<b>[_vs_...].png` — overlay of the runs, with a peak table.
-* `outputs_<baseline>_vs_<label>.png` — the output check (below).
+* `results_<a>_vs_<b>[_vs_...].png` — the TauREx plots of the runs, side by side (below).
 * `memory_<label>_peak.png` — bar chart of the peak, for runs that only have an
   `sacct` dump.
 * `memory_<label>_per_node.png`, `memory_<label>_top<N>.png` — optional breakdowns.
@@ -230,24 +256,19 @@ physical memory, the Slurm `--mem` allocation and the cgroup counter, with the
 per-rank smallest/average/largest underneath.*
 
 ![comparison](docs/comparison.png)
-*`compare_<a>_vs_<b>.png` — the runs overlaid, with the peak table and the `--mem`
-limit.*
+*`compare_<a>_vs_<b>.png` — the runs overlaid, with the peak table.*
 
-![output check](docs/output-check.png)
-*`outputs_<baseline>_vs_<label>.png` — the values the retrieval ended on: one row
-per value, a wide translucent dot for the baseline and a small solid dot for the
-other run on top, so overlapping dots are a value the two builds agree on and two
-dots apart are a value the fix moved. With a completed, non-`--light` retrieval
-the figure is instead the TauREx plotter output of the two runs side by side.*
+`results_<a>_vs_<b>.png` is the TauREx plots of the runs: one row per plot
+(mixing ratios, temperature profile, spectrum, contributions), one column per
+run, so reading a row down compares the runs on that plot.
 
 With `--compare`, every compared run gets its own `memory_<label>.png` and
 `memory_<label>_total.png` first, so each run can be read on its own and the
 `compare_*.png` overlay is written last. `--per-run` does the same for several
 runs that were not given with `--compare`.
 
-The [output check](#check-the-runs-did-the-same-work) runs first: it prints to the
-terminal and draws its own `outputs_*.png` figure, and with `--report` it also
-becomes a table in the markdown.
+The [results comparison](#compare-the-results) runs first: the TauREx plotter
+draws every output and the pages go side by side in `results_*.png`.
 
 The text summary and the report give the peak total, the peak per node (next to
 the `--mem` limit), the per-rank statistics with the extrapolation to
@@ -339,93 +360,41 @@ for cfg in 32 64 128; do
 done
 ```
 
-### Check the runs did the same work
+### Compare the results
 
-Memory is only comparable if the runs produced the same result, so every
-`--compare` also checks their outputs and says so before drawing anything:
+Memory is only comparable if the runs did the same work, so every `--compare`
+also draws the results the way a retrieval is read — with the TauREx plotter,
+once per run:
 
 ```
---- Output check (baseline mem_256_original) ---
-mem_256_oom: output_oom.hdf5 - DIFFERENT from output.hdf5 (332 of 423 datasets, largest 2.09 relative)
-    - Output/Solutions/solution0/fit_params/log_lee_mie_radius/nest_map: relative difference 2.09 (-2.90606 vs -0.940162)
-    - ModelParameters/Planet/mass_kg: relative difference 1 (0.12 vs 2.27775e+26)
-    - ... and 330 more
+taurex-plot -i <output> -o retrieval_<label>/ -x -t -s -c -C
 ```
 
-The file is the `-o` of the command recorded in each run's `run_<jobid>.meta`,
-looked up next to the logs and one directory up — the same name per run is not
-required, so `output.hdf5` and `output_oom.hdf5` compare fine. Point at it
-manually when the run was started outside `taurex-mem-run`:
+and puts its pages side by side in `results_<a>_vs_<b>.png`: one row per plot
+(mixing ratios active and inactive, temperature profile, spectrum, spectrum
+contributions), one column per run. Reading a row down compares the runs on that
+plot; reading a column across is reading one retrieval.
+
+The output is the `-o` of the command recorded in each run's `run_<jobid>.meta`,
+looked up next to the logs and one directory up; the runs do not have to share
+the file name. Point at it when the run was started outside `taurex-mem-run`:
 
 ```bash
 taurex-mem-plot --compare mem_256_original mem_256_oom \
-    --check-output output.hdf5 --check-output mem_256_oom=output_oom.hdf5
+    --output mem_256_original=output.hdf5 --output mem_256_oom=output_oom.hdf5
 ```
 
-A `[LABEL=]FILE` applies to that run, a plain `FILE` to every run. What is
-compared:
+A `[LABEL=]FILE` applies to that run, a plain `FILE` to every run;
+`--no-results` skips the comparison.
 
-| file | comparison |
-|---|---|
-| `.h5` / `.hdf5` | every dataset, within `--output-rtol`/`--output-atol`, plus the structure |
-| anything else | bytes |
-
-Every compared run is checked against the first (baseline) one, and the verdict
-is `same` or `DIFFERENT`. Differences are listed worst first; a dataset's
-**relative difference** is `max|a-b| / max|b|`, so it is not inflated by elements
-that are close to zero — 0.01 means the dataset changed by one percent of its own
-size, 1 that it changed completely. Two files of different kinds (an HDF5 against
-a text file) are reported as such instead of being compared. An HDF5 output that
-cannot be read at all — the truncated file an OOM-killed run leaves behind, for
-instance — is reported as `unreadable output` instead of aborting the
-comparison. Use `--no-check-output` to skip the check, and `--report` to get the
-same table in the markdown.
-
-When the two outputs are comparable the check draws
-`outputs_<baseline>_vs_<label>.png`, and it is the **TauREx plotter that draws
-it**: for each run the tool runs
-
-```
-taurex-plot -i <output> -o retrieval_<label>/ --all
-```
-
-and the figure puts the same TauREx plot of the two runs side by side — posteriors,
-molecular and condensate profiles, temperature profile, contributions, spectrum —
-so the two retrievals are compared the way they are actually read. The plotter
-figures are kept in `retrieval_<label>/` and reused, so it runs once per output.
-`--no-retrieval-plots` turns this off.
-
-These runs are stopped on purpose — a memory experiment kills them at a chosen
-point — so there is no *finished* retrieval for `taurex-plot` to draw. What the
-run did write is the model it ended on, and that is what the figure compares:
-the **values at the end of the retrieval**, one row per value.
-
-Every value of `ModelParameters` is a row: the baseline run is a wide translucent
-dot, the other run a small solid one on top, joined by a connector. A value both
-runs ended on the same way reads as a concentric pair (**overlapping dots = same
-value**, as the legend says); a value the other build moved reads as two dots
-apart, labelled with both numbers. The axis is logarithmic so values spanning
-`1e-5 … 1e21` stay comparable.
-
-This figure is what you get whenever the plotter cannot be used, so
-`taurex-mem-plot --compare a b` always produces it — no extra flag. The tool
-also says why it fell back, and how to get the TauREx plots instead.
-
-### If you do want the TauREx plotter comparison
-
-`taurex-plot --all` needs the forward `Output` group, which `--light` does not
-write, and it needs a retrieval that *ran to the end*. For a run that is meant
-to finish, drop `--light` (in `submit.sh`: `LIGHT=0 ./submit.sh 2 64 50`) and the
-tool runs
-
-```
-taurex-plot -i <output> -o retrieval_<label>/ --all
-```
-
-then puts the same TauREx plot of the two runs side by side. The plotter writes
-PDFs, which the tool rasterises with `pdftoppm`/`pdftocairo`/`convert` (poppler
-or ImageMagick); the pages are kept in `retrieval_<label>/` and reused, so it
-runs once per output.
+The plotter needs a retrieval that *ran to the end* and wrote the forward
+`Output` group, which `--light` does not (`submit.sh` uses `--light`); for a run
+that is meant to finish, drop it (`LIGHT=0 ./submit.sh 2 64 50`). With `h5py`
+installed such an output is skipped before the plotter is started (`taurex`
+brings `h5py`); when the plotter fails on an output it says so and prints the
+traceback. It writes PDFs, which are rasterised with
+`pdftoppm`/`pdftocairo`/`convert` (poppler or ImageMagick) and kept in
+`retrieval_<label>/`, so the plotter runs once per output.
 
 ### Read the comparison
 
@@ -444,8 +413,9 @@ runs once per output.
 ### Share it
 
 The `--report` markdown plus the PNG figures are self-contained: they list
-the runs, the peaks against the limit, the relative differences, the timings, the
-output check, and the per-node table. Copy them next to the logs, or commit them with the results.
+the runs, the peaks against the limit, the relative differences, the timings and
+the per-node table, next to the memory and results comparisons. Copy them next to
+the logs, or commit them with the results.
 
 ---
 
@@ -501,9 +471,9 @@ The CSVs are written and flushed sample by sample, so they survive an OOM kill.
   directory, as the example does.
 * **No comparison figure** — a single run gives the overview and total figures; a
   comparison needs two or more runs.
-* **Output check says "not checked"** — no output file was recorded in
-  `run_<jobid>.meta` (or the run was started by hand); pass `--check-output FILE`,
-  or `--no-check-output` if the runs are meant to differ.
+* **No results comparison** — the tool says which run it could not place: no
+  output file was recorded in its `run_<jobid>.meta` (or the run was started by
+  hand), so pass `--output [LABEL=]FILE`. `--no-results` skips the comparison.
 * **`--select` matches nothing** — it matches the label from
   `run_<jobid>.meta` or the job id; the error lists what is available.
 * **`pss_kb` is 0 for some processes** — `/proc/<pid>/smaps_rollup` was not
@@ -540,7 +510,7 @@ work uninstalled. CI runs them on Python 3.9 and 3.13.
 src/taurex_memory_profiler/
     monitor.py   per-node sampler: reads /proc, writes the two CSVs
     runner.py    taurex-mem-run: starts the samplers and runs the command
-    plot.py      taurex-mem-plot: figures, text summary and report
-    outputs.py   the output check: same result in every compared run
+    plot.py      taurex-mem-plot: figures, results comparison, summary and report
+    runs.py      the files a run leaves behind, and the pruning of old namesakes
 docs/            the figures shown above, from a 2-node 256-rank comparison
 ```

@@ -90,6 +90,47 @@ def test_runner_rejects_unknown_options():
     assert "--nope" in proc.stderr
 
 
+def test_runner_prunes_the_runs_that_share_the_label():
+    """A second run with the same name: kept with a note when nobody can be
+    asked, deleted (with its figures) when --delete-old says so."""
+    if not LINUX:
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        logs = Path(tmp) / "memory_logs"
+        first = call([*RUNNER, "-i", "0.2", "-j", "5001", "-l", "same",
+                      "--", "bash", "-c", "sleep 1"], cwd=tmp, MEM_RUN_WAIT="0")
+        assert first.returncode == 0, first.stdout + first.stderr
+        (logs / "memory_same.png").write_text("figure of the first run")
+
+        # the CSVs of a reader are not a terminal, so the question is not asked
+        second = call([*RUNNER, "-i", "0.2", "-j", "5002", "-l", "same",
+                       "--", "bash", "-c", "sleep 1"], cwd=tmp, MEM_RUN_WAIT="0")
+        assert second.returncode == 0, second.stdout + second.stderr
+        assert "2 runs are labelled 'same'" in second.stdout
+        assert "--delete-old" in second.stdout
+        assert (logs / "run_5001.meta").exists()
+
+        third = call([*RUNNER, "-i", "0.2", "-j", "5003", "-l", "same", "--delete-old",
+                      "--", "bash", "-c", "sleep 1"], cwd=tmp, MEM_RUN_WAIT="0")
+        assert third.returncode == 0, third.stdout + third.stderr
+        assert "Deleted the old run 5001" in third.stdout
+        assert "Deleted the old run 5002" in third.stdout
+        assert not (logs / "run_5001.meta").exists()
+        assert not list(logs.glob("*_5001_*.csv"))
+        assert not (logs / "memory_same.png").exists()
+        assert (logs / "run_5003.meta").exists()
+        assert list(logs.glob("node_memory_5003_*.csv"))
+
+        # --keep-old asks nothing and deletes nothing
+        fourth = call([*RUNNER, "-i", "0.2", "-j", "5004", "-l", "same", "--keep-old",
+                       "--", "bash", "-c", "sleep 1"], cwd=tmp, MEM_RUN_WAIT="0")
+        assert fourth.returncode == 0, fourth.stdout + fourth.stderr
+        assert "labelled 'same'" not in fourth.stdout
+        assert (logs / "run_5003.meta").exists()
+        assert (logs / "run_5004.meta").exists()
+
+
 def main():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for test in tests:

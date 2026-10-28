@@ -29,6 +29,8 @@ taurex-mem-plot mem_64.csv --compare mem_64_bad.csv \
     --label-a "OOM branch" --label-b "original taurex3" --title "2 nodes 64 tasks"
 
 # compare two runs by name, straight out of the log directory
+# (the memory profiles are overlaid and the TauREx plots of the results are put
+# side by side)
 taurex-mem-plot --compare mem_64_good mem_64_bad
 
 # several unified log directories, labelled
@@ -44,10 +46,10 @@ from __future__ import annotations
 import argparse
 from fnmatch import fnmatch
 import re
+import shlex
 import shutil
 import subprocess
 import sys
-import textwrap
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -60,8 +62,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from .outputs import (checked_any, compare_runs, format_checks, report_lines,
-                      structural_messages)
+from .runs import (NODE_RE, PROC_RE, duplicates, last_write, prune_duplicates,
+                   read_meta, safe)
 
 KB_PER_GB = 1024.0 ** 2
 DEFAULT_LIMIT_GB = 224.0
@@ -180,27 +182,9 @@ def load_csv(path: Path, node: str | None = None):
     return None, None
 
 
-def read_meta(base: Path, jobid: str) -> dict:
-    """Read the optional run_<jobid>.meta written by taurex-mem-run."""
-    for name in (f"run_{jobid}.meta", "run.meta"):
-        path = base / name
-        if path.is_file():
-            meta = {}
-            for line in path.read_text(errors="ignore").splitlines():
-                key, sep, value = line.partition("=")
-                if sep:
-                    meta[key.strip()] = value.strip()
-            meta.setdefault("jobid", jobid)
-            return meta
-    return {"jobid": jobid}
-
-
 # ----------------------------------------------------------------------
 # Discovery: build Run objects from files or directories
 # ----------------------------------------------------------------------
-
-NODE_RE = re.compile(r"^node_memory_(?P<job>.+?)_(?P<node>.+)\.csv$")
-PROC_RE = re.compile(r"^memory_(?P<job>.+?)_(?P<node>.+)\.csv$")
 
 
 def _log_root(path: Path) -> Path:
@@ -652,10 +636,6 @@ def save_fig(fig, base: Path):
     print(f"Saved {base}.png")
 
 
-def safe(name: str) -> str:
-    return re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or "run"
-
-
 # ----------------------------------------------------------------------
 # Figures
 # ----------------------------------------------------------------------
@@ -750,39 +730,35 @@ def plot_overview(run: Run, base: Path, limit_gb: float, project_ranks: int,
     save_fig(fig, base)
 
 
-def plot_total(run: Run, base: Path):
-    """Total memory over time (all ranks / all nodes)."""
-    values, minutes, kind = run_total(run)
-    if values is None:
-        return
-    what = "all ranks" if kind == "ranks" else "whole node (no per-process log)"
-    fig, ax = plt.subplots(figsize=(14, 6))
-    fig.patch.set_facecolor("#fcfcfb")
-    ax.plot(minutes, values, linewidth=1.6, color=BLUE)
-    if run.killed:
-        ax.scatter(minutes[-1], values[-1], marker="X", s=140, color=OOM_RED, zorder=5, label="OOM KILLED")
-        ax.legend(frameon=False, labelcolor=INK2)
-    style(ax, f"Total memory usage over time — {run.label}  ({what})",
-          xlabel="Time (minutes)", ylabel=f"Total {mem_label(run.mem)} (GB)")
-    fig.tight_layout()
-    save_fig(fig, base)
-
-
-def plot_per_node(run: Run, base: Path):
-    """One line per node."""
-    if run.proc is None:
+def plot_series(run: Run, base: Path, per_node: bool = False):
+    """Memory over time: the total of the run, or one line per node."""
+    if per_node and run.proc is None:
         print("Skipping per-node plot: no per-process log")
         return
-    table = per_node_time_sum(run)
-    minutes = minutes_since(run, table.index)
     fig, ax = plt.subplots(figsize=(14, 6))
     fig.patch.set_facecolor("#fcfcfb")
-    table = table.ffill().bfill()
-    for node in table.columns:
-        ax.plot(minutes, gb(run, table[node]), linewidth=1.2, label=node)
-    style(ax, f"Memory usage per node — {run.label}",
-          xlabel="Time (minutes)", ylabel=f"{mem_label(run.mem)} (GB)")
-    ax.legend(fontsize=9, ncol=2, frameon=False, labelcolor=INK2)
+    if per_node:
+        table = per_node_time_sum(run).ffill().bfill()
+        for node in table.columns:
+            ax.plot(minutes_since(run, table.index), gb(run, table[node]),
+                    linewidth=1.2, label=node)
+        ax.legend(fontsize=9, ncol=2, frameon=False, labelcolor=INK2)
+        title = f"Memory usage per node — {run.label}"
+        ylabel = f"{mem_label(run.mem)} (GB)"
+    else:
+        values, minutes, kind = run_total(run)
+        if values is None:
+            plt.close(fig)
+            return
+        ax.plot(minutes, values, linewidth=1.6, color=BLUE)
+        if run.killed:
+            ax.scatter(minutes[-1], values[-1], marker="X", s=140, color=OOM_RED,
+                       zorder=5, label="OOM KILLED")
+            ax.legend(frameon=False, labelcolor=INK2)
+        what = "all ranks" if kind == "ranks" else "whole node (no per-process log)"
+        title = f"Total memory usage over time — {run.label}  ({what})"
+        ylabel = f"Total {mem_label(run.mem)} (GB)"
+    style(ax, title, xlabel="Time (minutes)", ylabel=ylabel)
     fig.tight_layout()
     save_fig(fig, base)
 
@@ -811,7 +787,7 @@ def plot_top(run: Run, n: int, base: Path):
     save_fig(fig, base)
 
 
-def plot_compare(runs: list[Run], base: Path, limit_gb: float, title: str | None = None):
+def plot_compare(runs: list[Run], base: Path, title: str | None = None):
     """Overlay the total memory of several runs.
 
     A run without samples (for example one read from an sacct dump) is drawn as
@@ -824,27 +800,21 @@ def plot_compare(runs: list[Run], base: Path, limit_gb: float, title: str | None
     for index, run in enumerate(runs):
         color = CYCLE[index % len(CYCLE)]
         values, minutes, kind = run_total(run)
-        if values is None:
+        peak = None if values is None else float(np.max(values))
+        if peak is None:
+            # no samples: the measured peak is all there is to draw
             peak = run_peak_gb(run)
             if peak is None:
                 continue
-            summary.append((run, peak, kind))
-            continue
-        ax.plot(minutes, values, linewidth=1.4, color=color, label=run.label)
-        if run.killed:
-            ax.scatter(minutes[-1], values[-1], marker="X", s=140, color=OOM_RED, zorder=5)
-        summary.append((run, float(np.max(values)), kind))
-
-    # runs that only have a peak (sacct) — draw them as a reference line
-    for index, run in enumerate(runs):
-        if has_series(run) or run_peak_gb(run) is None:
-            continue
-        color = CYCLE[index % len(CYCLE)]
-        peak = run_peak_gb(run)
-        ax.axhline(peak, color=color, ls=":", lw=1.6)
-        ax.annotate(f"{run.label} peak (sacct): {peak:.2f} GB", (0.01, peak),
-                    xycoords=("axes fraction", "data"), xytext=(4, 4),
-                    textcoords="offset points", fontsize=9, color=color)
+            ax.axhline(peak, color=color, ls=":", lw=1.6)
+            ax.annotate(f"{run.label} peak (sacct): {peak:.2f} GB", (0.01, peak),
+                        xycoords=("axes fraction", "data"), xytext=(4, 4),
+                        textcoords="offset points", fontsize=9, color=color)
+        else:
+            ax.plot(minutes, values, linewidth=1.4, color=color, label=run.label)
+            if run.killed:
+                ax.scatter(minutes[-1], values[-1], marker="X", s=140, color=OOM_RED, zorder=5)
+        summary.append((run, peak, kind))
 
     ax.set_xlabel("Time (minutes)", color=INK2, fontsize=10)
     ax.set_ylabel("Total memory (GB)", color=INK2, fontsize=10)
@@ -873,72 +843,56 @@ def plot_compare(runs: list[Run], base: Path, limit_gb: float, title: str | None
                       f"  ({diff / peaks[first] * 100:+.1f}%)")
 
 
-def output_name(name: str, limit: int = 42) -> str:
-    """The tail of a long dataset path, so it fits next to an axis."""
-    if len(name) <= limit:
-        return name
-    parts = name.split("/")
-    short = parts[-1]
-    for part in reversed(parts[:-1]):
-        if len(short) + len(part) + 1 > limit:
-            break
-        short = f"{part}/{short}"
-    return short if short == name else "…/" + short
+def run_output(run: Run) -> Path | None:
+    """The file after ``-o``/``--output`` in the command recorded for the run."""
+    parts = shlex.split(run.meta.get("command", ""))
+    name = None
+    for index, part in enumerate(parts):
+        if part in ("-o", "--output") and index + 1 < len(parts):
+            name = parts[index + 1]
+        elif part.startswith("--output="):
+            name = part.split("=", 1)[1]
+    if not name:
+        return None
+    want = Path(name).expanduser()
+    base = Path(run.source).expanduser()
+    base = base if base.is_dir() else base.parent
+    # the output is looked up next to the logs and one directory up
+    for root in (base, base.parent, Path.cwd()):
+        if (root / want).is_file():
+            return root / want
+    return None
 
 
-def fmt_value(value: float) -> str:
-    return f"{value:.4g}" if np.isfinite(value) else "inf"
+# The results of a retrieval are read with the TauREx plotter, so its plots are
+# the comparison: these are exactly the flags of the retrieval comparison on the
+# command line (mixratio, temperature profile, spectrum, contributions).
+RESULT_FLAGS = ("-x", "-t", "-s", "-c", "-C")
+RESULT_NAMES = {
+    "fit_active_mixratio": "mixing ratios (active)",
+    "fit_inactive_mixratio": "mixing ratios (inactive)",
+    "tp_profile": "temperature profile",
+    "spectrum": "spectrum",
+    "spectrum_contrib": "spectrum contributions",
+    "tau": "optical depth",
+}
+# the order the flags are given in: mixing ratios, temperature, spectrum, contributions
+RESULT_ORDER = ("fit_active_mixratio", "fit_inactive_mixratio", "tp_profile",
+                "spectrum", "spectrum_contrib")
 
 
-# The TauREx plotter is the tool that actually draws a retrieval, so the
-# comparison of two runs is made of *its* plots rather than of our own reading
-# of the HDF5. `-a` draws everything, but an output written with `--light` has no
-# forward `Output` group and the plotter aborts, so the flags are also tried one
-# by one and whatever they manage to draw is kept.
-# One process tries the flags in turn, so the (slow) taurex import is paid once,
-# and every failure is echoed so a plot that could not be drawn is visible.
-RETRIEVAL_PLOTTER = """
-import sys
-from pathlib import Path
-from taurex.plot.plotter import main
-input_file, outdir = sys.argv[1], sys.argv[2]
-attempts = [["--all"]] + [[flag] for flag in ("-P", "-x", "-D", "-t", "-c", "-s", "-d")]
-for extra in attempts:
-    sys.argv = ["taurex-plot", "-i", input_file, "-o", outdir, *extra]
-    try:
-        main()
-    except SystemExit as exc:
-        if exc.code not in (0, None):
-            print(f"{' '.join(extra)}: exit {exc.code}", file=sys.stderr)
-    except Exception as exc:
-        print(f"{' '.join(extra)}: {type(exc).__name__}: {exc}", file=sys.stderr)
-    if list(Path(outdir).glob("*.png")):
-        break
-"""
+def result_name(stem: str) -> str:
+    """'output_fit_active_mixratio_sol0' -> 'fit_active_mixratio'."""
+    return re.sub(r"_sol\d+$", "", re.sub(r"^output_", "", stem))
 
 
-def has_forward_output(path: Path) -> bool:
-    """True when the output has the forward ``Output`` group the plotter reads.
-
-    Checked before shelling out, so a file the plotter cannot draw — a ``--light``
-    run writes ``ModelParameters`` and nothing else — costs nothing: without it
-    every one of the plotter's flags fails, and starting it means paying for a
-    TauREx import first.
-    """
-    try:
-        import h5py
-    except ImportError:
-        return False
-    try:
-        with h5py.File(path, "r") as handle:
-            return "Output" in handle
-    except OSError:
-        return False
-
-
-def taurex_plot_command(input_file: Path, outdir: Path) -> list[str]:
-    """The TauREx plotter, run with our own interpreter (same virtualenv)."""
-    return [sys.executable, "-c", RETRIEVAL_PLOTTER, str(input_file), str(outdir)]
+def result_title(stem: str) -> str:
+    """'output_fit_active_mixratio_sol0' -> 'mixing ratios (active)'."""
+    title = RESULT_NAMES.get(result_name(stem), result_name(stem).replace("_", " "))
+    solution = re.search(r"_sol(\d+)$", stem)
+    if solution and solution[1] != "0":
+        title += f" (solution {solution[1]})"
+    return title
 
 
 def rasterize_pdf(pdf: Path) -> Path | None:
@@ -966,295 +920,117 @@ def rasterize_pdf(pdf: Path) -> Path | None:
     return None
 
 
-def produce_retrieval_plots(input_file: Path, outdir: Path) -> list[Path]:
-    """Draw a retrieval with the TauREx plotter; return rasterised page paths.
+def has_forward_output(path: Path) -> bool:
+    """True when the output carries the ``Output`` group the plotter reads.
 
-    `--all` is tried first, then each plot on its own: an output that has the
-    ``Output`` group but is missing something a particular plot needs would
-    otherwise lose every plot. The plotter writes PDFs into `outdir`, which are
-    then rasterised next to them; the directory is reused, so the plotter runs
-    once per output.
+    A ``--light`` run writes ``ModelParameters`` and nothing else; the plotter
+    then draws a forward model of it instead of the retrieval, which is slow and
+    is not the comparison, so it is not started on such a file. Without h5py the
+    file cannot be read here and the plotter is left to decide.
+    """
+    try:
+        import h5py
+    except ImportError:
+        return True
+    try:
+        with h5py.File(path, "r") as handle:
+            return "Output" in handle
+    except OSError:
+        return False
+
+
+def result_plots(input_file: Path, outdir: Path) -> dict[str, Path]:
+    """Draw a run's retrieval with the TauREx plotter; return ``{page: PNG}``.
+
+    One call with the flags of the retrieval comparison, in this interpreter, so
+    the pages are the ones ``taurex-plot`` draws. The plotter writes PDFs into
+    `outdir`; they are rasterised next to them and the directory is reused, so
+    the plotter runs once per output. A file it cannot draw leaves its traceback
+    on the terminal.
     """
     if not has_forward_output(input_file):
-        return []
+        print(f"  {input_file.name} has no 'Output' group, which a --light run does "
+              "not write: the TauREx plots need the finished retrieval")
+        return {}
     outdir.mkdir(parents=True, exist_ok=True)
-    pages = sorted(outdir.glob("*.pdf"))
-    if not pages:
-        try:
-            proc = subprocess.run(taurex_plot_command(input_file, outdir),
-                                  capture_output=True, text=True, check=False)
-        except OSError as exc:
-            print(f"  TauREx plotter could not be started: {exc}")
-            return []
-        pages = sorted(outdir.glob("*.pdf"))
-        if not pages:
-            detail = proc.stderr.strip().splitlines()
-            print(f"  TauREx plotter drew nothing for {input_file.name}"
-                  + (f": {detail[-1]}" if detail else ""))
-            return []
-    rasters = [path for page in pages if (path := rasterize_pdf(page)) is not None]
-    if pages and not rasters:
+    if not list(outdir.glob("*.pdf")):
+        command = [sys.executable, "-m", "taurex.plot.plotter",
+                   "-i", str(input_file), "-o", str(outdir), *RESULT_FLAGS]
+        proc = subprocess.run(command, capture_output=True, text=True, check=False)
+        if not list(outdir.glob("*.pdf")):
+            print(f"  TauREx plotter drew nothing for {input_file.name}:")
+            for line in (proc.stderr.strip().splitlines() or ["(no error output)"])[-3:]:
+                print(f"    {line}")
+            return {}
+    pages = {pdf.stem: rasterize_pdf(pdf) for pdf in sorted(outdir.glob("*.pdf"))}
+    if not any(pages.values()):
         print("  PDFs were drawn but no rasteriser is available to compose them "
               "(install poppler-utils or ImageMagick)")
-    return sorted(rasters)
+        return {}
+    return {name: png for name, png in pages.items() if png is not None}
 
 
-def plot_retrieval_comparison(pages, base: Path, labels, max_rows: int = 6):
-    """Side-by-side comparison of the TauREx plots of two runs.
+def plot_results(panels: dict[str, dict[str, Path]], base: Path):
+    """The same TauREx plot of every run in a row, one row per plot.
 
-    `pages` is a list of ``(name, figure_from_the_baseline, figure_from_other)``
-    and `labels` the two run labels; each row shows the same TauREx plot for both
-    runs, which is what makes the two retrievals comparable at a glance.
+    `panels` maps each run label to its ``{page: PNG}``, so reading a row down is
+    comparing the runs on one plot and reading a column across is reading one
+    retrieval.
     """
-    pages = pages[:max_rows]
-    rows = len(pages)
-    fig, axes = plt.subplots(rows, 2, figsize=(13, 3.6 * rows), squeeze=False)
+    labels = list(panels)
+    pages = list(dict.fromkeys(page for panel in panels.values() for page in panel))
+    pages.sort(key=lambda page: (RESULT_ORDER.index(result_name(page))
+                                 if result_name(page) in RESULT_ORDER
+                                 else len(RESULT_ORDER), page))
+    heights = []
+    for page in pages:
+        sample = next(panel[page] for panel in panels.values() if page in panel)
+        height, width = plt.imread(sample).shape[:2]
+        heights.append(4.4 * height / width)
+    fig = plt.figure(figsize=(4.4 * len(labels), sum(heights) + 0.5))
     fig.patch.set_facecolor("#fcfcfb")
-    for row, (name, path_a, path_b) in enumerate(pages):
-        for column, path in enumerate((path_a, path_b)):
-            ax = axes[row][column]
-            ax.imshow(plt.imread(path))
-            ax.set_xticks([])
-            ax.set_yticks([])
-            ax.grid(False)
-            for side in ("top", "right", "left", "bottom"):
-                ax.spines[side].set_visible(False)
+    grid = fig.add_gridspec(len(pages), len(labels), height_ratios=heights)
+    for row, page in enumerate(pages):
+        for column, label in enumerate(labels):
+            ax = fig.add_subplot(grid[row, column])
+            ax.axis("off")
+            path = panels[label].get(page)
+            if path is None:
+                ax.text(0.5, 0.5, "not drawn", ha="center", va="center",
+                        color=MUTED, fontsize=10)
+            else:
+                ax.imshow(plt.imread(path))
             if row == 0:
-                ax.set_title(labels[column], color=INK, fontsize=11)
-        axes[row][0].annotate(name, (0, 0.5), xycoords="axes fraction",
-                              xytext=(-8, 0), textcoords="offset points",
-                              ha="right", va="center", fontsize=9, color=INK2,
-                              rotation=90)
-    fig.suptitle(f"TauREx retrieval plots: {labels[0]} vs {labels[1]}",
-                 color=INK, fontsize=12, x=0.01, ha="left")
-    fig.tight_layout(rect=(0.02, 0, 1, 0.98))
+                ax.set_title(label, color=INK, fontsize=12)
+            if column == 0:
+                ax.annotate(result_title(page), (0, 0.5), xycoords="axes fraction",
+                            xytext=(-10, 0), textcoords="offset points",
+                            ha="right", va="center", fontsize=10, color=INK2,
+                            rotation=90)
+    total = sum(heights) + 0.5
+    fig.suptitle("Results: " + " vs ".join(labels), color=INK, fontsize=13,
+                 x=0.01, y=1 - 0.15 / total, ha="left")
+    # the run labels sit on the top row, so the title needs its own band
+    fig.subplots_adjust(left=0.05, right=0.995, bottom=0.005,
+                        top=1 - 0.55 / total, hspace=0.14, wspace=0.03)
     save_fig(fig, base)
 
 
-def compare_retrieval_plots(check, out_root: Path, base_label: str,
-                            name: str) -> bool:
-    """Build the outputs figure from the TauREx plotter. False if unavailable."""
-    if check.path is None or check.baseline is None:
-        return False
-    missing = [path.name for path in (check.baseline, check.path)
-               if not has_forward_output(path)]
-    if missing:
-        print(f"  no retrieval-plot comparison: {', '.join(missing)} has no "
-              f"'Output' group, which a --light run does not write")
-        print("    (re-run the retrieval without --light for the TauREx plots; "
-              "comparing the values the runs ended on instead)")
-        return False
-    figures = {}
-    for label, path in ((base_label, check.baseline), (check.label, check.path)):
-        figures[label] = {p.name: p
-                          for p in produce_retrieval_plots(
-                              path, out_root / f"retrieval_{safe(label)}")}
-    common = sorted(set(figures[base_label]) & set(figures[check.label]))
-    if not common:
-        return False
-    pages = [(name_, figures[base_label][name_], figures[check.label][name_])
-             for name_ in common]
-    print(f"  TauREx plotter: comparing {len(common)} figures "
-          f"({', '.join(sorted(figures[base_label]))})")
-    plot_retrieval_comparison(pages, out_root / name, (base_label, check.label))
-    return True
-
-
-def _single(value) -> float | None:
-    """A dataset that holds exactly one number, as a float; None when it is not.
-
-    A ``ModelParameters`` leaf can be written as a scalar or as a one-element
-    array, and both are "one value" for this figure.
-    """
-    array = np.asarray(value)
-    if array.size != 1:
-        return None
-    number = float(array.reshape(-1)[0])
-    return number if np.isfinite(number) else None
-
-
-def _final_values(paths):
-    """The single-number values every output ended on, as ``(name, values)``.
-
-    Every leaf of ``ModelParameters`` is one quantity the retrieval settled on,
-    which is what can be compared between runs that were stopped before they
-    finished. Only the datasets all the outputs carry are kept, so a row holds a
-    value every compared run actually wrote.
-    """
-    import h5py
-
-    handles = [h5py.File(path, "r") for path in paths]
-    try:
-        names: list[str] = []
-        handles[0].visititems(lambda n, o: names.append(n)
-                              if isinstance(o, h5py.Dataset) else None)
-        values = []
-        for name in sorted(names):
-            if any(name not in handle for handle in handles[1:]):
-                continue
-            datasets = [handle[name] for handle in handles]
-            if any(data.dtype.kind not in "fiub" for data in datasets):
-                continue
-            numbers = [_single(data[()]) for data in datasets]
-            if any(number is None for number in numbers):
-                continue
-            values.append((name, numbers))
-        return values
-    finally:
-        for handle in handles:
-            handle.close()
-
-
-# One marker per run, in the order the runs are given: the baseline a wide
-# translucent dot, the second a small solid dot, the third a thin black cross
-# drawn over both. A row the runs agree on then still shows every run (the cross
-# stays visible on the dots), and a row one run moved is readable by shape
-# alone. Runs past the third fall back to the palette cycle.
-RUN_MARKERS = (
-    dict(marker="o", s=170, facecolors=BLUE, edgecolors=BLUE, alpha=0.45,
-         linewidths=1.6, zorder=3),
-    dict(marker="o", s=30, color=ORANGE, alpha=1.0, zorder=4),
-    dict(marker="x", s=60, color=INK, alpha=1.0, linewidths=1.1, zorder=5),
-)
-
-
-def _final_value_panel(ax, values, labels):
-    """One row per value: a marker for every run, joined, the moved rows labelled."""
-    table = np.array([numbers for _name, numbers in values], dtype=float)
-    log = bool(np.all(table > 0)
-               and table.max() / max(table.min(), 1e-300) > 1e3)
-
-    positions = np.arange(len(values))[::-1]
-    for position, numbers in zip(positions, table):
-        ax.plot([numbers.min(), numbers.max()], [position, position],
-                color=GRID, lw=1.8, zorder=1)
-    for index, label in enumerate(labels):
-        extra = dict(marker="o", s=26, alpha=1.0, zorder=4,
-                     color=CYCLE[index % len(CYCLE)])
-        ax.scatter(table[:, index], positions, label=label,
-                   **(RUN_MARKERS[index] if index < len(RUN_MARKERS) else extra))
-    if log:
-        ax.set_xscale("log")
-
-    ax.set_yticks(positions)
-    ax.set_yticklabels([output_name(name, 46) for name, _numbers in values],
-                       fontsize=8.5, color=INK2)
-    ax.set_ylim(-0.8, len(values) - 0.2)
-    style(ax, f"{len(values)} values at the end of the retrieval",
-          xlabel="value (log scale)" if log else "value")
-    ax.legend(fontsize=9, frameon=False, labelcolor=INK2, loc="lower right",
-              scatterpoints=1, handletextpad=0.6,
-              title="a marker on top of the others = same value",
-              title_fontsize=8.5)
-
-    differing = [index for index in range(len(values))
-                 if not np.all(table[index] == table[index][0])]
-    for index in differing:
-        # all the values of that row, in the order the runs are given
-        ax.annotate(" / ".join(fmt_value(number) for number in table[index]),
-                    (table[index].max(), positions[index]),
-                    xytext=(6, 0), textcoords="offset points", va="center",
-                    fontsize=8, color=OOM_RED)
-    ax.annotate(f"{len(values) - len(differing)} identical, {len(differing)} "
-                f"different over {len(labels)} runs",
-                (0.995, 1.01), xycoords="axes fraction", ha="right", va="bottom",
-                fontsize=9, fontweight="bold",
-                color=OOM_RED if differing else AQUA)
-
-
-def plot_output_checks(checks, base: Path, rtol: float, labels):
-    """The values the runs ended on, one row per value, one marker per run.
-
-    These runs are stopped on purpose, so there is no finished retrieval for
-    ``taurex-plot`` to draw. What the run did write is the model it ended on, and
-    that is what this figure compares: every value gets a row, with one marker
-    per run on a shared axis joined by a connector — markers on top of each other
-    mean the runs ended on the same value, a long connector is a value a run
-    moved. The rows that differ are labelled with the values in run order.
-
-    The verdict in the title is about the numbers only. A dataset one output
-    carries and another does not, or a shape that changed, has no number to
-    compare: it is counted as structural, named in the caption and left out of
-    the verdict instead of turning the figure into a red failure.
-    """
-    failing = [diff for check in checks for diff in check.datasets
-               if diff.rel is not None and not diff.same]
-    structural: list[str] = []
-    for check in checks:
-        for message in structural_messages(check):
-            if message not in structural:
-                structural.append(message)
-
-    values = []
-    if all(check.path is not None and check.baseline is not None
-           for check in checks):
-        values = _final_values([checks[0].baseline]
-                               + [check.path for check in checks])
-
-    rows = len(values)
-    fig, ax = plt.subplots(figsize=(12, max(4.2, 1.6 + 0.36 * rows)))
-    fig.patch.set_facecolor("#fcfcfb")
-
-    if rows:
-        _final_value_panel(ax, values, labels)
-    else:
-        # a byte comparison, an unreadable output, or nothing numeric to show
-        ax.axis("off")
-        if all(check.same for check in checks):
-            ax.text(0.005, 0.9, "the compared outputs are identical", va="top",
-                    fontsize=12, fontweight="bold", color=AQUA)
-        else:
-            ax.text(0.005, 0.9, "no numeric value to compare", va="top",
-                    fontsize=12, fontweight="bold", color=INK2)
-            lines = [line for check in checks
-                     for line in (check.diffs + check.notes)][:6]
-            if lines:
-                ax.text(0.005, 0.6, "\n".join(f"\u2022 {line}" for line in lines),
-                        va="top", fontsize=9.5, color=OOM_RED, family="monospace")
-
-    verdict = ""
-    if failing:
-        moved = [f"{check.label}: {len([d for d in check.datasets if d.rel is not None and not d.same])}"
-                 f" outside rtol {rtol:g}"
-                 for check in checks
-                 if any(d.rel is not None and not d.same for d in check.datasets)]
-        verdict = "\u2717 " + "; ".join(moved)
-        if len(checks) == 1:
-            verdict += f" of {checks[0].total} datasets"
-        largest = max((diff.rel for diff in failing), default=None)
-        if largest is not None:
-            verdict += f"   |   largest {largest:.3g}"
-    elif rows:
-        verdict = f"\u2713 {rows} values identical within rtol {rtol:g}"
-    else:
-        verdict = "\u2713 no numeric value to compare"
-    if structural:
-        verdict += (f"   |   {len(structural)} structural "
-                    f"difference{'s' if len(structural) != 1 else ''}, not compared")
-    # The runs are named in the legend, so the title only has to carry the
-    # verdict: repeating three long labels here pushes it off the figure.
-    # textwrap, not Text(wrap=True): wrapping a figure-level title loops forever
-    # in this matplotlib (`_get_layout` asks for the extent it is computing).
-    fig.suptitle("\n".join(textwrap.wrap(
-                     f"Values at the end of the retrieval — {verdict}", 115)),
-                 color=OOM_RED if failing else INK, fontsize=11.5, x=0.01,
-                 ha="left")
-
-    caption = [" vs ".join(output_name(path.name, 40) for path in
-                           [checks[0].baseline] + [check.path for check in checks])]
-    if structural:
-        short = [text if len(text) <= 60 else text[:57] + "..."
-                 for text in structural[:2]]
-        caption.insert(0, "not plotted: " + "; ".join(short))
-    fig.text(0.01, 0.008, "\n".join(textwrap.wrap(" — ".join(caption), 165)),
-             fontsize=8.5, color=MUTED, va="bottom")
-    fig.tight_layout(rect=(0, 0.035, 1, 0.95))
-    save_fig(fig, base)
-
-
-def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
-    """Two runs of :func:`plot_output_checks` — the pairwise entry point."""
-    plot_output_checks([check], base, rtol, [baseline_label, check.label])
+def compare_results(runs: list[Run], out_root: Path,
+                    explicit: dict[str | None, Path] | None = None):
+    """Draw the results of every run with the TauREx plotter, then compare them."""
+    explicit = explicit or {}
+    panels: dict[str, dict[str, Path]] = {}
+    for run in runs:
+        output = explicit.get(run.label) or explicit.get(None) or run_output(run)
+        if output is None:
+            print(f"  no results comparison for {run.label}: the -o of its command "
+                  "is not next to the logs (pass the output with --output)")
+            continue
+        panels[run.label] = result_plots(output, out_root / f"retrieval_{safe(run.label)}")
+    if sum(bool(panel) for panel in panels.values()) < 2:
+        return
+    plot_results(panels, out_root / ("results_" + "_vs_".join(safe(label) for label in panels)))
 
 
 def print_summary(run: Run, limit_gb: float, project_ranks: int):
@@ -1352,8 +1128,7 @@ def plot_peaks(runs: list[Run], base: Path, title: str | None = None):
 # Markdown report
 # ----------------------------------------------------------------------
 
-def write_report(runs: list[Run], path: Path, limit_gb: float, project_ranks: int,
-                 checks: list | None = None, rtol: float = 1e-6):
+def write_report(runs: list[Run], path: Path, limit_gb: float, project_ranks: int):
     """Small shareable report: memory peaks plus the timing side by side."""
     lines = ["# TauREx memory report", ""]
     lines.append("* baseline: `{}`".format(runs[0].label))
@@ -1419,9 +1194,6 @@ def write_report(runs: list[Run], path: Path, limit_gb: float, project_ranks: in
     lines += ["", f"Projected to {project_ranks} ranks/node, memory is assumed to scale "
                   "with the rank count; check the per-rank numbers before trusting it.", ""]
 
-    if checks:
-        lines += report_lines(checks, rtol)
-
     path.write_text("\n".join(lines) + "\n")
     print(f"Saved report to {path}")
 
@@ -1471,21 +1243,13 @@ def parse_args(argv=None):
     parser.add_argument("--no-overview", action="store_true", help="skip the overview figure")
     parser.add_argument("--no-total", action="store_true", help="skip the total figure")
     parser.add_argument("--title", default=None, help="custom title for the comparison figure")
-    parser.add_argument("--check-output", action="append", default=None,
+    parser.add_argument("--output", action="append", default=None,
                         metavar="[LABEL=]FILE",
-                        help="override the output file compared across the runs "
-                             "(the check is automatic: it uses the -o recorded in "
-                             "run_<jobid>.meta, and compares HDF5 dataset by dataset "
-                             "or anything else byte by byte)")
-    parser.add_argument("--no-retrieval-plots", action="store_true",
-                        help="do not run the TauREx plotter on the outputs; draw "
-                             "the values instead")
-    parser.add_argument("--no-check-output", action="store_true",
-                        help="do not compare the outputs of the compared runs")
-    parser.add_argument("--output-rtol", type=float, default=1e-6,
-                        help="relative tolerance for the output check [1e-06]")
-    parser.add_argument("--output-atol", type=float, default=0.0,
-                        help="absolute tolerance for the output check [0]")
+                        help="the HDF5 output of a compared run, when it is not the "
+                             "-o recorded in run_<jobid>.meta (LABEL= for one run, "
+                             "a plain FILE for every run)")
+    parser.add_argument("--no-results", "--no-retrieval-plots", action="store_true",
+                        help="do not draw the TauREx plots of the results")
     parser.add_argument("--report", default=None, metavar="PATH",
                         help="also write a short markdown report of peaks and timings")
     parser.add_argument("--killed", dest="killed", action="store_true", default=None,
@@ -1495,6 +1259,12 @@ def parse_args(argv=None):
     parser.add_argument("--killed-a", action="store_true", help="mark the first run as OOM-killed")
     parser.add_argument("--killed-b", action="store_true", help="mark the second run as OOM-killed")
     parser.add_argument("--killed-c", action="store_true", help="mark the third run as OOM-killed")
+    parser.add_argument("--delete-old", dest="old_runs", action="store_const", const="delete",
+                        help="when several runs share a name, delete the older ones "
+                             "without asking")
+    parser.add_argument("--keep-old", dest="old_runs", action="store_const", const="keep",
+                        help="keep every run that shares a name, without asking")
+    parser.set_defaults(old_runs=None)
     return parser.parse_args(argv)
 
 
@@ -1543,6 +1313,37 @@ def collect_specs(args):
     return specs, args.job
 
 
+def prune_duplicate_runs(runs: list[Run], policy: str | None) -> list[Run]:
+    """Drop the runs a newer run with the same name has replaced.
+
+    Two runs that share a name also share the figure names, so only the run
+    written last is plotted; the older ones are offered for deletion first.
+    The other runs of that name are looked for in the whole log directory and
+    not only among the runs being plotted: picking one job, with ``--job`` or
+    by taking the newest of the directory, must still find the runs it shares
+    its name with. The name is the one in ``run_<jobid>.meta``, not the label
+    the command line gave the run for the comparison figure.
+    """
+    # (log directory, run name) -> {plotted job id: index in `runs`}
+    groups: dict[tuple[Path, str], dict[str, int]] = {}
+    for index, run in enumerate(runs):
+        base = Path(run.source)
+        jobid = run.meta.get("jobid")
+        if not base.is_dir() or not jobid:
+            continue
+        name = run.meta.get("label") or run.label
+        groups.setdefault((base, name), {})[jobid] = index
+
+    dropped: set[int] = set()
+    for (base, name), plotted in groups.items():
+        if len(duplicates(base, name)) < 2:
+            continue
+        keep = max(plotted, key=lambda jobid: last_write(base, jobid))
+        deleted = set(prune_duplicates(base, name, keep=keep, policy=policy))
+        dropped |= {index for jobid, index in plotted.items() if jobid in deleted}
+    return [run for index, run in enumerate(runs) if index not in dropped]
+
+
 def main(argv=None):
     args = parse_args(argv)
     specs, job = collect_specs(args)
@@ -1575,6 +1376,8 @@ def main(argv=None):
     if not runs:
         sys.exit("ERROR: nothing to plot")
 
+    runs = prune_duplicate_runs(runs, args.old_runs)
+
     for run in runs:
         finalize(run, args.rss, args.command)
         run.timing = read_timing(run)
@@ -1599,40 +1402,14 @@ def main(argv=None):
     for run in runs:
         print_summary(run, args.limit_gb, args.project_ranks)
 
-    checks: list = []
-    if len(runs) > 1 and not args.no_check_output:
-        explicit = {}
-        for spec in args.check_output or []:
-            spec_label, spec_path, _ = split_spec(spec)
-            explicit[spec_label] = str(spec_path)
-        try:
-            checks = compare_runs(runs, explicit, args.output_rtol, args.output_atol)
-        except RuntimeError as exc:
-            sys.exit(f"ERROR: {exc}")
-        if checked_any(checks) or explicit:
-            print(format_checks(checks, runs[0].label, args.output_rtol))
-        drawable = []
-        for check in checks:
-            # a truncated or unreadable output has nothing to draw: it is only
-            # reported in the text, there is no comparison to make
-            if not check.datasets:
-                continue
-            stem = out_root / f"outputs_{safe(runs[0].label)}_vs_{safe(check.label)}"
-            # The comparison the retrieval is actually read with: the plots the
-            # TauREx plotter makes of both outputs, side by side. Our own reading
-            # of the HDF5 is only used when it is asked for, either because the
-            # plotter is switched off or because it cannot read the outputs.
-            if not args.no_retrieval_plots and compare_retrieval_plots(
-                    check, out_root, runs[0].label, stem.name):
-                continue
-            drawable.append(check)
-        if drawable:
-            # One figure for every run that has a comparison to draw: three
-            # builds compared is one picture, not three pairwise ones.
-            labels = [runs[0].label] + [check.label for check in drawable]
-            stem = out_root / ("outputs_"
-                               + "_vs_".join(safe(label) for label in labels))
-            plot_output_checks(drawable, stem, args.output_rtol, labels)
+    # The results are compared the way a retrieval is read: the TauREx plotter
+    # draws each output and the pages are put side by side.
+    explicit = {}
+    for spec in args.output or []:
+        spec_label, spec_path, _ = split_spec(spec)
+        explicit[spec_label] = spec_path.expanduser().resolve()
+    if len(runs) > 1 and not args.no_results:
+        compare_results(runs, out_root, explicit)
 
     # --compare also draws each run on its own, so the runs are readable one by
     # one before they are overlaid.
@@ -1642,23 +1419,22 @@ def main(argv=None):
         if make_single and not args.no_overview:
             plot_overview(run, stem, args.limit_gb, args.project_ranks, title=args.title)
         if make_single and not args.no_total:
-            plot_total(run, stem.with_name(stem.name + "_total"))
+            plot_series(run, stem.with_name(stem.name + "_total"))
         if args.per_node:
-            plot_per_node(run, stem.with_name(stem.name + "_per_node"))
+            plot_series(run, stem.with_name(stem.name + "_per_node"), per_node=True)
         if args.top > 0:
             plot_top(run, args.top, stem.with_name(stem.name + f"_top{args.top}"))
 
     if len(runs) > 1:
         base = out_root / ("compare_" + "_vs_".join(safe(r.label) for r in runs))
-        plot_compare(runs, base, args.limit_gb, title=args.title)
+        plot_compare(runs, base, title=args.title)
     elif not has_series(runs[0]):
         plot_peaks(runs, out_root / f"memory_{safe(runs[0].label)}_peak")
 
     if args.report:
         report_path = Path(args.report)
         report_path.parent.mkdir(parents=True, exist_ok=True)
-        write_report(runs, report_path, args.limit_gb, args.project_ranks,
-                     checks=checks, rtol=args.output_rtol)
+        write_report(runs, report_path, args.limit_gb, args.project_ranks)
 
 
 if __name__ == "__main__":
