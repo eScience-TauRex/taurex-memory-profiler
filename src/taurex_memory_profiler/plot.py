@@ -29,8 +29,8 @@ taurex-mem-plot mem_64.csv --compare mem_64_bad.csv \
     --label-a "OOM branch" --label-b "original taurex3" --title "2 nodes 64 tasks"
 
 # compare two runs by name, straight out of the log directory
-# (the memory profiles are overlaid and the TauREx plots of the results are put
-# side by side)
+# (the memory profiles are overlaid and the results of the runs are drawn on the
+# same axes, one curve per run)
 taurex-mem-plot --compare mem_64_good mem_64_bad
 
 # several unified log directories, labelled
@@ -47,8 +47,6 @@ import argparse
 from fnmatch import fnmatch
 import re
 import shlex
-import shutil
-import subprocess
 import sys
 import warnings
 from dataclasses import dataclass, field
@@ -59,6 +57,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless — works over SSH
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 
@@ -864,173 +863,270 @@ def run_output(run: Run) -> Path | None:
     return None
 
 
-# The results of a retrieval are read with the TauREx plotter, so its plots are
-# the comparison: these are exactly the flags of the retrieval comparison on the
-# command line (mixratio, temperature profile, spectrum, contributions).
-RESULT_FLAGS = ("-x", "-t", "-s", "-c", "-C")
-RESULT_NAMES = {
-    "fit_active_mixratio": "mixing ratios (active)",
-    "fit_inactive_mixratio": "mixing ratios (inactive)",
-    "tp_profile": "temperature profile",
-    "spectrum": "spectrum",
-    "spectrum_contrib": "spectrum contributions",
-    "tau": "optical depth",
+# A retrieval is read with the same figures `taurex-plot` draws, but the plotter
+# writes one figure per output and cannot overlay them; the arrays are read from
+# the outputs instead and every run is one curve on the same axes.
+MODEL_AXES = {
+    "TransmissionModel": r"$(R_p/R_*)^2$",
+    "EmissionModel": r"$F_p/F_*$",
+    "DirectImageModel": r"$F_p$",
 }
-# the order the flags are given in: mixing ratios, temperature, spectrum, contributions
-RESULT_ORDER = ("fit_active_mixratio", "fit_inactive_mixratio", "tp_profile",
-                "spectrum", "spectrum_contrib")
+LINE_STYLES = ("-", "--", "-.", ":")
+# the order `taurex-plot` lists them in, the largest contributor first
+SOURCE_ORDER = ("Absorption", "Rayleigh", "CIA", "Mie")
 
 
-def result_name(stem: str) -> str:
-    """'output_fit_active_mixratio_sol0' -> 'fit_active_mixratio'."""
-    return re.sub(r"_sol\d+$", "", re.sub(r"^output_", "", stem))
+def _texts(dataset) -> list[str]:
+    """The strings of a dataset of bytes or str, in a flat list."""
+    return [value.decode() if isinstance(value, bytes) else str(value)
+            for value in np.asarray(dataset[()]).reshape(-1)]
 
 
-def result_title(stem: str) -> str:
-    """'output_fit_active_mixratio_sol0' -> 'mixing ratios (active)'."""
-    title = RESULT_NAMES.get(result_name(stem), result_name(stem).replace("_", " "))
-    solution = re.search(r"_sol(\d+)$", stem)
-    if solution and solution[1] != "0":
-        title += f" (solution {solution[1]})"
-    return title
+def read_result(path: Path) -> dict | None:
+    """The arrays one finished retrieval is compared on, or None if it has none.
 
-
-def rasterize_pdf(pdf: Path) -> Path | None:
-    """PDF -> PNG, so the plotter's page can be composed into the montage.
-
-    The TauREx plotter always writes PDF, which cannot be read back by
-    matplotlib directly; a poppler or ImageMagick rasteriser is used for that.
+    A ``--light`` run writes ``ModelParameters`` and nothing else, so it has no
+    ``Output`` group: there is no retrieval to draw and the caller says so.
     """
-    target = pdf.with_suffix(".png")
-    if target.is_file():
-        return target
-    for command in (["pdftoppm", "-png", "-r", "110", "-singlefile", str(pdf),
-                     str(target.with_suffix(""))],
-                    ["pdftocairo", "-png", "-singlefile", str(pdf),
-                     str(target.with_suffix(""))],
-                    ["convert", "-density", "110", str(pdf), str(target)]):
-        if shutil.which(command[0]) is None:
-            continue
-        try:
-            subprocess.run(command, capture_output=True, text=True, check=False)
-        except OSError:
-            continue
-        if target.is_file():
-            return target
-    return None
+    import h5py
+
+    with h5py.File(path, "r") as handle:
+        if "Output" not in handle:
+            return None
+        solution = handle["Output/Solutions/solution0"]
+        profiles, spectra = solution["Profiles"], solution["Spectra"]
+        chemistry = handle["ModelParameters/Chemistry"]
+        optimizer = handle["Optimizer"] if "Optimizer" in handle else {}
+
+        result = {
+            "model": _texts(handle["ModelParameters/model_type"])[0],
+            "wlgrid": spectra["binned_wlgrid"][()],
+            "spectrum": spectra["binned_spectrum"][()],
+            # each source is the spectrum with that source alone, so they add up
+            # to nothing: they are drawn one line each, never summed
+            "sources": {name: source["binned_spectrum"][()]
+                        for name, source in spectra["Contributions"].items()
+                        if "binned_spectrum" in source},
+            "pressure": profiles["pressure_profile"][()] / 1e5,
+            "temperature": profiles["temp_profile"][()],
+            "temperature_std": profiles["temp_profile_std"][()],
+            "gases": dict(zip(_texts(chemistry["active_gases"]),
+                              profiles["active_mix_profile"][()])),
+            "names": (_texts(optimizer["fit_parameter_names"])
+                      if "fit_parameter_names" in optimizer else []),
+            "latex": (_texts(optimizer["fit_parameter_latex"])
+                      if "fit_parameter_latex" in optimizer else []),
+        }
+        if "Observed" in handle:
+            result["observed"] = {key: handle["Observed"][key][()]
+                                  for key in ("wlgrid", "spectrum", "errorbars")}
+        # the posterior the retrieval sampled, one row per draw
+        if "tracedata" in solution and "weights" in solution:
+            result["tracedata"] = solution["tracedata"][()]
+            result["weights"] = solution["weights"][()]
+    return result
 
 
-def has_forward_output(path: Path) -> bool:
-    """True when the output carries the ``Output`` group the plotter reads.
-
-    A ``--light`` run writes ``ModelParameters`` and nothing else; the plotter
-    then draws a forward model of it instead of the retrieval, which is slow and
-    is not the comparison, so it is not started on such a file. Without h5py the
-    file cannot be read here and the plotter is left to decide.
-    """
-    try:
-        import h5py
-    except ImportError:
-        return True
-    try:
-        with h5py.File(path, "r") as handle:
-            return "Output" in handle
-    except OSError:
-        return False
+def _run_legend(ax, labels, colours, location):
+    """One white-framed legend: a colour per run, so the curves stay readable."""
+    handles = [Line2D([], [], color=colour, label=label)
+               for colour, label in zip(colours, labels)]
+    ax.legend(handles=handles, fontsize=8.5, loc=location, frameon=True,
+              facecolor="white", edgecolor="none", framealpha=0.9,
+              labelcolor=INK2)
 
 
-def result_plots(input_file: Path, outdir: Path) -> dict[str, Path]:
-    """Draw a run's retrieval with the TauREx plotter; return ``{page: PNG}``.
-
-    One call with the flags of the retrieval comparison, in this interpreter, so
-    the pages are the ones ``taurex-plot`` draws. The plotter writes PDFs into
-    `outdir`; they are rasterised next to them and the directory is reused, so
-    the plotter runs once per output. A file it cannot draw leaves its traceback
-    on the terminal.
-    """
-    if not has_forward_output(input_file):
-        print(f"  {input_file.name} has no 'Output' group, which a --light run does "
-              "not write: the TauREx plots need the finished retrieval")
-        return {}
-    outdir.mkdir(parents=True, exist_ok=True)
-    if not list(outdir.glob("*.pdf")):
-        command = [sys.executable, "-m", "taurex.plot.plotter",
-                   "-i", str(input_file), "-o", str(outdir), *RESULT_FLAGS]
-        proc = subprocess.run(command, capture_output=True, text=True, check=False)
-        if not list(outdir.glob("*.pdf")):
-            print(f"  TauREx plotter drew nothing for {input_file.name}:")
-            for line in (proc.stderr.strip().splitlines() or ["(no error output)"])[-3:]:
-                print(f"    {line}")
-            return {}
-    pages = {pdf.stem: rasterize_pdf(pdf) for pdf in sorted(outdir.glob("*.pdf"))}
-    if not any(pages.values()):
-        print("  PDFs were drawn but no rasteriser is available to compose them "
-              "(install poppler-utils or ImageMagick)")
-        return {}
-    return {name: png for name, png in pages.items() if png is not None}
+def _styled_legend(ax, labels, colours, names, location):
+    """Colour = run, line style = species or source, in a single legend."""
+    handles = [Line2D([], [], color=colour, label=label)
+               for colour, label in zip(colours, labels)]
+    handles += [Line2D([], [], color=MUTED, ls=LINE_STYLES[index % len(LINE_STYLES)],
+                       label=name) for index, name in enumerate(names)]
+    ax.legend(handles=handles, fontsize=8.5, loc=location, frameon=True,
+              facecolor="white", edgecolor="none", framealpha=0.9,
+              labelcolor=INK2)
 
 
-def plot_results(panels: dict[str, dict[str, Path]], base: Path):
-    """The same TauREx plot of every run in a row, one row per plot.
-
-    `panels` maps each run label to its ``{page: PNG}``, so reading a row down is
-    comparing the runs on one plot and reading a column across is reading one
-    retrieval.
-    """
-    labels = list(panels)
-    pages = list(dict.fromkeys(page for panel in panels.values() for page in panel))
-    pages.sort(key=lambda page: (RESULT_ORDER.index(result_name(page))
-                                 if result_name(page) in RESULT_ORDER
-                                 else len(RESULT_ORDER), page))
-    heights = []
-    for page in pages:
-        sample = next(panel[page] for panel in panels.values() if page in panel)
-        height, width = plt.imread(sample).shape[:2]
-        heights.append(4.4 * height / width)
-    fig = plt.figure(figsize=(4.4 * len(labels), sum(heights) + 0.5))
+def _axes_and_colours(results: dict[str, dict], size):
+    """A framed single axes and one colour per run, in the run order."""
+    labels = list(results)
+    colours = [CYCLE[index % len(CYCLE)] for index in range(len(labels))]
+    fig, ax = plt.subplots(figsize=size)
     fig.patch.set_facecolor("#fcfcfb")
-    grid = fig.add_gridspec(len(pages), len(labels), height_ratios=heights)
-    for row, page in enumerate(pages):
-        for column, label in enumerate(labels):
-            ax = fig.add_subplot(grid[row, column])
-            ax.axis("off")
-            path = panels[label].get(page)
-            if path is None:
-                ax.text(0.5, 0.5, "not drawn", ha="center", va="center",
-                        color=MUTED, fontsize=10)
-            else:
-                ax.imshow(plt.imread(path))
-            if row == 0:
-                ax.set_title(label, color=INK, fontsize=12)
-            if column == 0:
-                ax.annotate(result_title(page), (0, 0.5), xycoords="axes fraction",
-                            xytext=(-10, 0), textcoords="offset points",
-                            ha="right", va="center", fontsize=10, color=INK2,
-                            rotation=90)
-    total = sum(heights) + 0.5
-    fig.suptitle("Results: " + " vs ".join(labels), color=INK, fontsize=13,
-                 x=0.01, y=1 - 0.15 / total, ha="left")
-    # the run labels sit on the top row, so the title needs its own band
-    fig.subplots_adjust(left=0.05, right=0.995, bottom=0.005,
-                        top=1 - 0.55 / total, hspace=0.14, wspace=0.03)
+    return labels, colours, fig, ax
+
+
+def plot_spectrum(results: dict[str, dict], base: Path):
+    """The observation once, and the model spectrum of every run on top of it."""
+    first = next(iter(results.values()))
+    labels, colours, fig, ax = _axes_and_colours(results, (13, 6.5))
+    width = first["wlgrid"]
+
+    handles = []
+    observed = first.get("observed")
+    if observed:
+        ax.errorbar(observed["wlgrid"], observed["spectrum"], observed["errorbars"],
+                    ls="none", lw=1, color=INK, alpha=0.55)
+        handles.append(Line2D([], [], color=INK, marker="o", ls="none", alpha=0.55,
+                              label="observed"))
+    for label, colour in zip(labels, colours):
+        model = results[label]
+        good = model["spectrum"] > 0
+        ax.plot(model["wlgrid"][good], model["spectrum"][good], color=colour,
+                lw=1.6, label=label)
+        handles.append(Line2D([], [], color=colour, label=label))
+
+    ax.set_yscale("log")
+    if width.max() - width.min() > 5:
+        ax.set_xscale("log")
+    style(ax, "Spectrum", xlabel=r"wavelength [$\mu$m]",
+          ylabel=MODEL_AXES.get(first["model"], "model"))
+    ax.legend(handles=handles, fontsize=9, loc="upper right", frameon=True,
+              facecolor="white", edgecolor="none", framealpha=0.9, labelcolor=INK2)
+    fig.tight_layout()
+    save_fig(fig, base)
+
+
+def plot_contributions(results: dict[str, dict], base: Path):
+    """Every opacity source once per run: colour is the run, style the source."""
+    first = next(iter(results.values()))
+    labels, colours, fig, ax = _axes_and_colours(results, (13, 6.5))
+    sources = sorted(dict.fromkeys(name for label in labels
+                                   for name in results[label]["sources"]),
+                     key=lambda name: (SOURCE_ORDER.index(name)
+                                       if name in SOURCE_ORDER else len(SOURCE_ORDER),
+                                       name))
+    for label, colour in zip(labels, colours):
+        model = results[label]
+        for index, name in enumerate(sources):
+            source = model["sources"].get(name)
+            if source is None:
+                continue
+            good = source > 0
+            ax.plot(model["wlgrid"][good], source[good], color=colour,
+                    ls=LINE_STYLES[index % len(LINE_STYLES)], lw=1.2)
+
+    if all(np.all(model["sources"][name] > 0)
+           for model in results.values() for name in model["sources"]):
+        ax.set_yscale("log")
+    width = first["wlgrid"]
+    if width.max() - width.min() > 5:
+        ax.set_xscale("log")
+    style(ax, "Contributions (one source at a time)",
+          xlabel=r"wavelength [$\mu$m]",
+          ylabel=MODEL_AXES.get(first["model"], "model"))
+    _styled_legend(ax, labels, colours, sources, "lower right")
+    fig.tight_layout()
+    save_fig(fig, base)
+
+
+def plot_tp_profile(results: dict[str, dict], base: Path):
+    """Temperature against pressure, one line and one ±1σ band per run."""
+    labels, colours, fig, ax = _axes_and_colours(results, (7.5, 6.5))
+    for label, colour in zip(labels, colours):
+        model = results[label]
+        pressure = model["pressure"]
+        ax.plot(model["temperature"], pressure, color=colour, lw=1.8, label=label)
+        ax.fill_betweenx(pressure, model["temperature"] - model["temperature_std"],
+                         model["temperature"] + model["temperature_std"],
+                         color=colour, alpha=0.10, lw=0)
+    ax.set_yscale("log")
+    ax.invert_yaxis()
+    style(ax, "Temperature profile", xlabel="temperature [K]", ylabel="pressure [bar]")
+    _run_legend(ax, labels, colours, "upper left")
+    fig.tight_layout()
+    save_fig(fig, base)
+
+
+def plot_mixratios(results: dict[str, dict], base: Path):
+    """Every active gas once per run: colour is the run, style the gas."""
+    first = next(iter(results.values()))
+    labels, colours, fig, ax = _axes_and_colours(results, (8.5, 6.5))
+    gases = list(first["gases"])
+    for label, colour in zip(labels, colours):
+        model = results[label]
+        pressure = model["pressure"]
+        for index, gas in enumerate(gases):
+            profile = model["gases"].get(gas)
+            if profile is None:
+                continue
+            good = profile > 0
+            ax.plot(profile[good], pressure[good], color=colour,
+                    ls=LINE_STYLES[index % len(LINE_STYLES)], lw=1.3)
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.invert_yaxis()
+    style(ax, "Mixing ratios (active)", xlabel="mixing ratio", ylabel="pressure [bar]")
+    _styled_legend(ax, labels, colours, gases, "lower left")
+    fig.tight_layout()
+    save_fig(fig, base)
+
+
+def plot_posteriors(results: dict[str, dict], base: Path):
+    """The sampled posterior of every fitted parameter, one step per run."""
+    with_samples = {label: model for label, model in results.items()
+                    if "tracedata" in model}
+    if not with_samples:
+        print("  no posterior plotted: the outputs carry no tracedata")
+        return
+    first = next(iter(with_samples.values()))
+    labels = list(with_samples)
+    colours = [CYCLE[index % len(CYCLE)] for index in range(len(labels))]
+    names, latex = first["names"], first["latex"] or first["names"]
+    columns = 4
+    rows = int(np.ceil(len(names) / columns))
+    fig, axes = plt.subplots(rows, columns, figsize=(4.0 * columns, 2.9 * rows),
+                             squeeze=False)
+    fig.patch.set_facecolor("#fcfcfb")
+    for index, name in enumerate(names):
+        ax = axes[index // columns][index % columns]
+        for label, colour in zip(labels, colours):
+            model = with_samples[label]
+            if name not in model["names"]:
+                continue
+            column = model["names"].index(name)
+            ax.hist(model["tracedata"][:, column], bins=40,
+                    weights=model["weights"], density=True, histtype="step",
+                    color=colour, lw=1.5, label=label)
+        style(ax, latex[index] if index < len(latex) else name, xlabel=name,
+              ylabel="density")
+    for index in range(len(names), rows * columns):
+        axes[index // columns][index % columns].axis("off")
+    _run_legend(axes[0][0], labels, colours, "upper right")
+    fig.suptitle("Posteriors of the fitted parameters", color=INK, fontsize=13,
+                 x=0.01, ha="left")
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     save_fig(fig, base)
 
 
 def compare_results(runs: list[Run], out_root: Path,
                     explicit: dict[str | None, Path] | None = None):
-    """Draw the results of every run with the TauREx plotter, then compare them."""
+    """Read every run's results and write one comparison figure per quantity."""
     explicit = explicit or {}
-    panels: dict[str, dict[str, Path]] = {}
+    results: dict[str, dict] = {}
     for run in runs:
         output = explicit.get(run.label) or explicit.get(None) or run_output(run)
         if output is None:
             print(f"  no results comparison for {run.label}: the -o of its command "
                   "is not next to the logs (pass the output with --output)")
             continue
-        panels[run.label] = result_plots(output, out_root / f"retrieval_{safe(run.label)}")
-    if sum(bool(panel) for panel in panels.values()) < 2:
+        result = read_result(output)
+        if result is None:
+            print(f"  no results for {run.label}: {output.name} has no 'Output' group, "
+                  "which a --light run does not write (re-run it without --light, or "
+                  "point at the finished output with --output)")
+            continue
+        results[run.label] = result
+    if len(results) < 2:
+        print("  no results figures: fewer than two runs have a finished output")
         return
-    plot_results(panels, out_root / ("results_" + "_vs_".join(safe(label) for label in panels)))
+    stem = "_vs_".join(safe(label) for label in results)
+    for name, plot in (("spectra", plot_spectrum),
+                       ("contributions", plot_contributions),
+                       ("tp_profiles", plot_tp_profile),
+                       ("mixratios", plot_mixratios),
+                       ("posteriors", plot_posteriors)):
+        plot(results, out_root / f"compare_{name}_{stem}")
 
 
 def print_summary(run: Run, limit_gb: float, project_ranks: int):
@@ -1249,7 +1345,7 @@ def parse_args(argv=None):
                              "-o recorded in run_<jobid>.meta (LABEL= for one run, "
                              "a plain FILE for every run)")
     parser.add_argument("--no-results", "--no-retrieval-plots", action="store_true",
-                        help="do not draw the TauREx plots of the results")
+                        help="do not draw the results of the compared runs")
     parser.add_argument("--report", default=None, metavar="PATH",
                         help="also write a short markdown report of peaks and timings")
     parser.add_argument("--killed", dest="killed", action="store_true", default=None,

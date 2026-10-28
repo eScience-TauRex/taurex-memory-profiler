@@ -26,6 +26,7 @@ Repository = "https://github.com/eScience-TauRex/taurex-memory-profiler"
 
 [project.optional-dependencies]
 pyspy = ["py-spy"]
+hdf5 = ["h5py"]
 tests = ["pytest"]
 
 [project.scripts]

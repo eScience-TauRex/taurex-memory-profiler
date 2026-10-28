@@ -344,16 +344,19 @@ def test_compare_by_run_name():
         assert "mem_64_nope" in proc.stderr and "available" in proc.stderr
 
 
-def test_results_comparison_puts_the_runs_side_by_side():
-    """--compare shows the TauREx plots of the results, one row per plot.
+def test_results_comparison_overlays_the_runs():
+    """Every comparison figure holds all the runs on one axes, one curve per run.
 
-    The plotter is stubbed: what is checked is the composition — one column per
-    run, one row per page, so the same page of two runs sits in the same row.
+    The comparison is not a grid of the plotter's pages: the arrays are read from
+    the outputs, so the spectrum figure of two runs holds two model curves on the
+    same axis next to the single observation, and each fitted parameter gets one
+    histogram per run.
     """
     try:
         import matplotlib
+        import numpy as np
     except ImportError:
-        print("SKIP test_results_comparison_puts_the_runs_side_by_side (no matplotlib)")
+        print("SKIP test_results_comparison_overlays_the_runs (no deps)")
         return
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -361,39 +364,111 @@ def test_results_comparison_puts_the_runs_side_by_side():
     sys.path.insert(0, str(SRC))
     from taurex_memory_profiler import plot as plotmod
 
-    saved_fig, saved_plots = plotmod.save_fig, plotmod.result_plots
+    def fake(scale: float, temperature: float) -> dict:
+        wl = np.linspace(1.0, 2.0, 12)
+        shape = np.linspace(1.0, 1.2, 12)
+        pressure = np.logspace(-6.0, 1.0, 20)
+        samples = np.linspace(temperature - 5.0, temperature + 5.0, 50)
+        return {
+            "model": "TransmissionModel",
+            "wlgrid": wl,
+            "spectrum": scale * shape,
+            "sources": {"Absorption": 0.9 * scale * shape,
+                        "Rayleigh": 0.1 * scale * shape},
+            "pressure": pressure,
+            "temperature": np.full(pressure.size, temperature),
+            "temperature_std": np.full(pressure.size, 5.0),
+            "gases": {"H2O": np.full(pressure.size, 1e-4),
+                      "CH4": np.full(pressure.size, 1e-5)},
+            "observed": {"wlgrid": wl, "spectrum": 0.02 * shape,
+                         "errorbars": np.full(wl.size, 1e-4)},
+            "names": ["T"],
+            "latex": ["$T$"],
+            "tracedata": samples.reshape(-1, 1),
+            "weights": np.ones(samples.size),
+        }
+
+    saved_fig = plotmod.save_fig
     captured: list = []
     plotmod.save_fig = lambda fig, base: captured.append((fig, base))
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            tmp = Path(tmp)
-            pages = {}
-            for stem, slope in (("a", 1.0), ("b", 1.4)):
-                (tmp / f"{stem}.hdf5").write_bytes(b"")
-                directory = tmp / f"rp_{stem}"
-                directory.mkdir()
-                for name in ("output_spectrum", "output_tp_profile"):
-                    fig, ax = plt.subplots(figsize=(2, 1))
-                    ax.plot([0, 1], [0, slope])
-                    fig.savefig(directory / f"{name}.png", dpi=50)
-                    plt.close(fig)
-                pages[stem] = {name: directory / f"{name}.png"
-                               for name in ("output_spectrum", "output_tp_profile")}
-            plotmod.result_plots = lambda path, outdir: pages[path.stem]
-
-            # the -o recorded in the meta is what is drawn, one file per run
-            runs = [plotmod.Run(label=stem, source=str(tmp),
-                                meta={"command": f"taurex -o {stem}.hdf5"})
-                    for stem in ("a", "b")]
-            plotmod.compare_results(runs, tmp)
-            fig, base = captured[-1]
-            assert base.name == "results_a_vs_b", base   # save_fig adds .png
-            assert len(fig.axes) == 4, "2 pages x 2 runs"
-            assert [ax.get_title() for ax in fig.axes[0:2]] == ["a", "b"]
-            assert fig.axes[2].get_title() == "", "the run labels sit on the top row"
+            results = {"a": fake(0.02, 350.0), "b": fake(0.021, 360.0)}
+            for name, plot in (("spectra", plotmod.plot_spectrum),
+                               ("contributions", plotmod.plot_contributions),
+                               ("tp_profiles", plotmod.plot_tp_profile),
+                               ("mixratios", plotmod.plot_mixratios),
+                               ("posteriors", plotmod.plot_posteriors)):
+                plot(results, Path(tmp) / f"compare_{name}")
     finally:
-        plotmod.save_fig, plotmod.result_plots = saved_fig, saved_plots
-        plt.close("all")
+        plotmod.save_fig = saved_fig
+
+    assert [base.name for _fig, base in captured] == [
+        "compare_spectra", "compare_contributions", "compare_tp_profiles",
+        "compare_mixratios", "compare_posteriors"]
+
+    spectrum = captured[0][0].axes[0]
+    # one observation + one model curve per run, on the same axis
+    assert len(spectrum.lines) == 3, [line.get_label() for line in spectrum.lines]
+    assert [text.get_text() for text in spectrum.get_legend().get_texts()] == \
+        ["observed", "a", "b"]
+    assert len(captured[1][0].axes[0].lines) == 4, "2 sources x 2 runs"
+    assert len(captured[2][0].axes[0].lines) == 2
+    mixing = captured[3][0].axes[0]
+    assert len(mixing.lines) == 4, "2 gases x 2 runs"
+    # colour = run, line style = source or gas
+    legend = [text.get_text() for text in mixing.get_legend().get_texts()]
+    assert legend == ["a", "b", "H2O", "CH4"], legend
+    # one histogram per run in the posterior of the one fitted parameter
+    posterior = captured[4][0].axes[0]
+    assert len(posterior.get_legend().get_texts()) == 2
+    plt.close("all")
+
+
+def test_read_result_of_a_light_output():
+    """An output without the forward 'Output' group has no results to draw."""
+    try:
+        import h5py
+        import numpy as np
+    except ImportError:
+        print("SKIP test_read_result_of_a_light_output (no h5py)")
+        return
+
+    sys.path.insert(0, str(SRC))
+    from taurex_memory_profiler import plot as plotmod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        light = Path(tmp) / "light.hdf5"
+        with h5py.File(light, "w") as handle:
+            handle["ModelParameters/model_type"] = np.bytes_(b"TransmissionModel")
+        assert plotmod.read_result(light) is None
+
+        # the groups the comparison reads, one solution deep
+        done = Path(tmp) / "done.hdf5"
+        with h5py.File(done, "w") as handle:
+            handle["ModelParameters/model_type"] = np.bytes_(b"TransmissionModel")
+            handle["ModelParameters/Chemistry/active_gases"] = np.array(
+                [b"H2O"], dtype="S3")
+            handle["Observed/wlgrid"] = np.linspace(1.0, 2.0, 4)
+            handle["Observed/spectrum"] = np.full(4, 0.02)
+            handle["Observed/errorbars"] = np.full(4, 1e-4)
+            solution = handle.create_group("Output/Solutions/solution0")
+            spectra = solution.create_group("Spectra")
+            spectra["binned_wlgrid"] = np.linspace(1.0, 2.0, 4)
+            spectra["binned_spectrum"] = np.full(4, 0.02)
+            spectra["Contributions/Rayleigh/binned_spectrum"] = np.full(4, 0.01)
+            profiles = solution.create_group("Profiles")
+            profiles["pressure_profile"] = np.logspace(1.0, 5.0, 3)
+            profiles["temp_profile"] = np.full(3, 350.0)
+            profiles["temp_profile_std"] = np.full(3, 5.0)
+            profiles["active_mix_profile"] = np.full((1, 3), 1e-4)
+
+        result = plotmod.read_result(done)
+        assert result["model"] == "TransmissionModel"
+        assert list(result["sources"]) == ["Rayleigh"]
+        assert list(result["gases"]) == ["H2O"]
+        assert result["pressure"][-1] == 1.0, "Pa -> bar"
+        assert result["observed"]["spectrum"].size == 4
 
 
 def test_duplicate_run_names_ask_before_deleting():

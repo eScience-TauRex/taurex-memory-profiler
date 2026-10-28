@@ -19,7 +19,7 @@ NODE_RE = re.compile(r"^node_memory_(?P<job>.+?)_(?P<node>.+)\.csv$")
 PROC_RE = re.compile(r"^memory_(?P<job>.+?)_(?P<node>.+)\.csv$")
 
 # The files the plotter names after the label rather than after the job id.
-FIGURE_PATTERNS = ("memory_", "results_", "compare_", "report_", "profile_")
+FIGURE_PATTERNS = ("memory_", "compare_", "report_", "profile_")
 FIGURE_SUFFIXES = (".png", ".svg", ".pdf", ".md", ".html")
 
 
