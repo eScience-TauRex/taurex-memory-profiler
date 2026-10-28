@@ -314,6 +314,26 @@ def structural_count(check: Check) -> int:
     return len(structural_messages(check))
 
 
+def numeric_failures(check: Check) -> list[DatasetDiff]:
+    """The failures that carry a number: a dataset both outputs do carry."""
+    return [diff for diff in check.failed if diff.rel is not None]
+
+
+def agrees_numerically(check: Check) -> bool:
+    """True when every dataset the outputs share matches within the tolerance.
+
+    ``Check.same`` is stricter: it is false as soon as one output carries a
+    dataset the other does not, which says nothing about the numbers. A run whose
+    shared values all agree but whose file holds, say, the whole ``Observed``
+    group more fails ``same`` and passes this.
+    """
+    if check.kind == "hdf5":
+        return bool(check.total) and not numeric_failures(check)
+    if check.kind == "bytes":
+        return check.same
+    return False
+
+
 def format_checks(checks: list[Check], baseline_label: str, rtol: float) -> str:
     """The stdout block of the output check."""
     lines = [f"--- Output check (baseline {baseline_label}) ---"]
@@ -335,13 +355,27 @@ def format_checks(checks: list[Check], baseline_label: str, rtol: float) -> str:
         if check.kind == "hdf5":
             largest = largest_relative(check)
             worst = "" if largest is None else f", largest {largest:.3g} relative"
-            count = (f"{len(problems)} of {check.total} datasets" if check.total
-                     else "unreadable output")
+            failed = numeric_failures(check)
             structural = structural_count(check)
-            if structural and check.total:
-                count += f" ({structural} structural)"
-            head = (f"{check.label}: {check.path.name} - DIFFERENT from "
-                    f"{check.baseline.name} ({count}{worst})")
+            if not failed and check.total:
+                # Every dataset both outputs carry agrees, so the numbers are the
+                # same and only the structure of the file differs. That is not a
+                # failure: counting the "only in" notes against the shared
+                # datasets, as a plain DIFFERENT would, reports "132 of 55" and
+                # turns a run whose values are all identical into a red verdict.
+                count = f"{check.total} shared datasets"
+                if structural:
+                    count += f", {structural} structural"
+                head = (f"{check.label}: {check.path.name} - same values, "
+                        f"different structure from {check.baseline.name} "
+                        f"({count}{worst})")
+            else:
+                count = (f"{len(failed)} of {check.total} datasets"
+                         if check.total else "unreadable output")
+                if structural and check.total:
+                    count += f", {structural} structural"
+                head = (f"{check.label}: {check.path.name} - DIFFERENT from "
+                        f"{check.baseline.name} ({count}{worst})")
         else:
             head = (f"{check.label}: {check.path.name} - DIFFERENT from "
                     f"{check.baseline.name}")
@@ -367,8 +401,17 @@ def report_lines(checks: list[Check], rtol: float) -> list[str]:
             if largest is not None:
                 unit += f", largest {largest:.3g} relative"
             lines.append(f"| `{check.label}` | `{check.path.name}` | same ({unit}) |")
+        elif agrees_numerically(check) and not check.same:
+            largest = largest_relative(check)
+            worst = "" if largest is None else f", largest {largest:.3g} relative"
+            what = f"{check.total} shared datasets"
+            structural = structural_count(check)
+            if structural:
+                what += f", {structural} structural"
+            lines.append(f"| `{check.label}` | `{check.path.name}` | "
+                         f"same values, different structure ({what}{worst}) |")
         elif check.kind == "hdf5":
-            count = len(check.diffs) + len(check.notes)
+            count = len(numeric_failures(check))
             largest = largest_relative(check)
             worst = "" if largest is None else f", largest {largest:.3g} relative"
             what = (f"{count} of {check.total} datasets" if check.total

@@ -511,6 +511,89 @@ def test_output_check_figure_shows_the_values():
         plt.close(fig)
 
 
+def test_output_figure_holds_every_run():
+    """Three compared runs are one figure, each run its own marker.
+
+    The verdict in the title is about the numbers only: a run whose output
+    carries a group the others do not is not a failed comparison, because there
+    is no number to compare there. Only a value outside the tolerance turns the
+    verdict red.
+    """
+    try:
+        import h5py
+        import matplotlib
+        import matplotlib.colors
+        import numpy as np
+    except ImportError:
+        print("SKIP test_output_figure_holds_every_run (no deps)")
+        return
+    matplotlib.use("Agg")
+
+    sys.path.insert(0, str(SRC))
+    from taurex_memory_profiler import plot as plotmod
+    from taurex_memory_profiler.outputs import compare_runs
+
+    class FakeRun:  # compare_runs only reads these three attributes
+        def __init__(self, source, meta, label):
+            self.source, self.meta, self.label = source, meta, label
+
+    def write(name: str, T: float) -> None:
+        with h5py.File(tmp / f"{name}.hdf5", "w") as handle:
+            handle["T"] = np.float64(T)
+            handle["R"] = np.float64(1.2)
+            if name == "third":      # a group only this run wrote
+                handle["Observed"] = np.zeros(4)
+
+    captured: list = []
+    saved = plotmod.save_fig
+    plotmod.save_fig = lambda fig, base: captured.append(fig)
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            runs = [FakeRun(str(tmp), {"label": label,
+                                       "command": f"taurex -o {label}.hdf5"}, label)
+                    for label in ("good", "other", "third")]
+            for label in ("good", "other", "third"):
+                write(label, 1500.0)
+
+            checks = compare_runs(runs, {}, rtol=1e-6, atol=0.0)
+            assert len(checks) == 2, checks
+            plotmod.plot_output_checks(checks, tmp / "fig", 1e-6,
+                                       ["good", "other", "third"])
+            fig = captured[-1]
+            assert len(fig.axes) == 1, "the values are the whole figure"
+            ax = fig.axes[0]
+            assert len(ax.collections) == 3, "one marker set per run"
+            # the third run is the thin black cross, so it stays visible on top
+            # of the two dots where the three agree
+            edges = [matplotlib.colors.to_hex(c.get_edgecolors()[0])
+                     for c in ax.collections]
+            assert edges[2].lower() == "#0b0b0b", edges
+            assert len(set(edges)) == 3, edges
+            legend = [text.get_text() for text in ax.get_legend().get_texts()]
+            assert legend == ["good", "other", "third"], legend
+            title = fig.get_suptitle()
+            assert "identical" in title, title
+            assert "\u2717" not in title, title       # structure is not a failure
+            assert "1 structural difference" in title, title
+
+            # a value one run moved is the only thing that fails the comparison
+            write("third", 1501.0)
+            checks = compare_runs(runs, {}, rtol=1e-6, atol=0.0)
+            plotmod.plot_output_checks(checks, tmp / "fig2", 1e-6,
+                                       ["good", "other", "third"])
+            fig = captured[-1]
+            title = fig.get_suptitle()
+            assert "\u2717 third: 1 outside rtol" in title, title
+            assert fig.axes[0].collections, "every run is still drawn"
+    finally:
+        plotmod.save_fig = saved
+
+    import matplotlib.pyplot as plt
+    for fig in captured:
+        plt.close(fig)
+
+
 def test_retrieval_plot_comparison():
     """The outputs figure is built from the TauREx plotter's own figures."""
     try:

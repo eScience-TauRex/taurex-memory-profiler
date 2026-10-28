@@ -47,6 +47,7 @@ import re
 import shutil
 import subprocess
 import sys
+import textwrap
 import warnings
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -1072,141 +1073,188 @@ def _single(value) -> float | None:
     return number if np.isfinite(number) else None
 
 
-def _final_values(path_a: Path, path_b: Path):
-    """The single-number values both outputs ended on, as ``(name, a, b)``.
+def _final_values(paths):
+    """The single-number values every output ended on, as ``(name, values)``.
 
     Every leaf of ``ModelParameters`` is one quantity the retrieval settled on,
-    which is what can be compared between two runs that were stopped before they
-    finished.
+    which is what can be compared between runs that were stopped before they
+    finished. Only the datasets all the outputs carry are kept, so a row holds a
+    value every compared run actually wrote.
     """
     import h5py
 
-    values = []
-    with h5py.File(path_a, "r") as fa, h5py.File(path_b, "r") as fb:
+    handles = [h5py.File(path, "r") for path in paths]
+    try:
         names: list[str] = []
-        fa.visititems(lambda n, o: names.append(n)
-                      if isinstance(o, h5py.Dataset) else None)
+        handles[0].visititems(lambda n, o: names.append(n)
+                              if isinstance(o, h5py.Dataset) else None)
+        values = []
         for name in sorted(names):
-            if name not in fb:
+            if any(name not in handle for handle in handles[1:]):
                 continue
-            data_a, data_b = fa[name], fb[name]
-            if data_a.dtype.kind not in "fiub" or data_b.dtype.kind not in "fiub":
+            datasets = [handle[name] for handle in handles]
+            if any(data.dtype.kind not in "fiub" for data in datasets):
                 continue
-            a, b = _single(data_a[()]), _single(data_b[()])
-            if a is not None and b is not None:
-                values.append((name, a, b))
-    return values
+            numbers = [_single(data[()]) for data in datasets]
+            if any(number is None for number in numbers):
+                continue
+            values.append((name, numbers))
+        return values
+    finally:
+        for handle in handles:
+            handle.close()
 
 
-def _final_value_panel(ax, values, base_label: str, other_label: str):
-    """One row per value: a dot for each run, joined, the two values labelled."""
-    base = np.array([v for _n, v, _ in values])
-    other = np.array([v for _n, _, v in values])
-    log = bool(np.all(base > 0) and np.all(other > 0)
-               and base.max() / max(base.min(), 1e-300) > 1e3)
+# One marker per run, in the order the runs are given: the baseline a wide
+# translucent dot, the second a small solid dot, the third a thin black cross
+# drawn over both. A row the runs agree on then still shows every run (the cross
+# stays visible on the dots), and a row one run moved is readable by shape
+# alone. Runs past the third fall back to the palette cycle.
+RUN_MARKERS = (
+    dict(marker="o", s=170, facecolors=BLUE, edgecolors=BLUE, alpha=0.45,
+         linewidths=1.6, zorder=3),
+    dict(marker="o", s=30, color=ORANGE, alpha=1.0, zorder=4),
+    dict(marker="x", s=60, color=INK, alpha=1.0, linewidths=1.1, zorder=5),
+)
+
+
+def _final_value_panel(ax, values, labels):
+    """One row per value: a marker for every run, joined, the moved rows labelled."""
+    table = np.array([numbers for _name, numbers in values], dtype=float)
+    log = bool(np.all(table > 0)
+               and table.max() / max(table.min(), 1e-300) > 1e3)
 
     positions = np.arange(len(values))[::-1]
-    for position, left, right in zip(positions, base, other):
-        ax.plot([left, right], [position, position], color=GRID, lw=1.8, zorder=1)
-    # The baseline is a wide translucent dot and the other run a small solid one
-    # on top, so a value both runs agree on reads as a concentric pair instead of
-    # one dot hiding the other; a value that moved reads as two dots apart.
-    ax.scatter(base, positions, s=170, marker="o", facecolors=BLUE, alpha=0.45,
-               edgecolors=BLUE, linewidths=1.6, zorder=3, label=base_label)
-    ax.scatter(other, positions, s=30, marker="o", color=ORANGE, alpha=1.0,
-               zorder=4, label=other_label)
+    for position, numbers in zip(positions, table):
+        ax.plot([numbers.min(), numbers.max()], [position, position],
+                color=GRID, lw=1.8, zorder=1)
+    for index, label in enumerate(labels):
+        extra = dict(marker="o", s=26, alpha=1.0, zorder=4,
+                     color=CYCLE[index % len(CYCLE)])
+        ax.scatter(table[:, index], positions, label=label,
+                   **(RUN_MARKERS[index] if index < len(RUN_MARKERS) else extra))
     if log:
         ax.set_xscale("log")
 
     ax.set_yticks(positions)
-    ax.set_yticklabels([output_name(name, 46) for name, _a, _b in values],
+    ax.set_yticklabels([output_name(name, 46) for name, _numbers in values],
                        fontsize=8.5, color=INK2)
     ax.set_ylim(-0.8, len(values) - 0.2)
     style(ax, f"{len(values)} values at the end of the retrieval",
           xlabel="value (log scale)" if log else "value")
     ax.legend(fontsize=9, frameon=False, labelcolor=INK2, loc="lower right",
               scatterpoints=1, handletextpad=0.6,
-              title="overlapping dots = same value",
+              title="a marker on top of the others = same value",
               title_fontsize=8.5)
 
-    differing = [index for index in range(len(values)) if base[index] != other[index]]
+    differing = [index for index in range(len(values))
+                 if not np.all(table[index] == table[index][0])]
     for index in differing:
-        ax.annotate(f"{fmt_value(base[index])} → {fmt_value(other[index])}",
-                    (max(base[index], other[index]), positions[index]),
+        # all the values of that row, in the order the runs are given
+        ax.annotate(" / ".join(fmt_value(number) for number in table[index]),
+                    (table[index].max(), positions[index]),
                     xytext=(6, 0), textcoords="offset points", va="center",
                     fontsize=8, color=OOM_RED)
-    ax.annotate(f"{len(values) - len(differing)} identical, {len(differing)} different",
+    ax.annotate(f"{len(values) - len(differing)} identical, {len(differing)} "
+                f"different over {len(labels)} runs",
                 (0.995, 1.01), xycoords="axes fraction", ha="right", va="bottom",
                 fontsize=9, fontweight="bold",
-                color=AQUA if not differing else OOM_RED)
+                color=OOM_RED if differing else AQUA)
 
 
-def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
-    """The values the two runs ended on, one row per value.
+def plot_output_checks(checks, base: Path, rtol: float, labels):
+    """The values the runs ended on, one row per value, one marker per run.
 
     These runs are stopped on purpose, so there is no finished retrieval for
     ``taurex-plot`` to draw. What the run did write is the model it ended on, and
-    that is what this figure compares: every value gets a row, with one dot per
-    run on a shared axis joined by a connector — two dots on top of each other
-    mean the two builds ended on the same value, a long connector is a value the
-    other build moved. The rows that differ are labelled with both values.
+    that is what this figure compares: every value gets a row, with one marker
+    per run on a shared axis joined by a connector — markers on top of each other
+    mean the runs ended on the same value, a long connector is a value a run
+    moved. The rows that differ are labelled with the values in run order.
 
-    Differences with no numeric value — a shape or dtype change — cannot be
-    drawn, so they are named in the caption and counted in the verdict.
+    The verdict in the title is about the numbers only. A dataset one output
+    carries and another does not, or a shape that changed, has no number to
+    compare: it is counted as structural, named in the caption and left out of
+    the verdict instead of turning the figure into a red failure.
     """
-    measured = [d for d in check.datasets if d.rel is not None]
-    failing = [d for d in measured if not d.same]
-    structural = structural_messages(check)      # shape/dtype: nothing to plot
-    largest = max((d.rel for d in measured), default=None)
+    failing = [diff for check in checks for diff in check.datasets
+               if diff.rel is not None and not diff.same]
+    structural: list[str] = []
+    for check in checks:
+        for message in structural_messages(check):
+            if message not in structural:
+                structural.append(message)
 
     values = []
-    if check.kind == "hdf5" and check.baseline is not None and check.path is not None:
-        values = _final_values(check.baseline, check.path)
+    if all(check.path is not None and check.baseline is not None
+           for check in checks):
+        values = _final_values([checks[0].baseline]
+                               + [check.path for check in checks])
 
     rows = len(values)
     fig, ax = plt.subplots(figsize=(12, max(4.2, 1.6 + 0.36 * rows)))
     fig.patch.set_facecolor("#fcfcfb")
 
     if rows:
-        _final_value_panel(ax, values, baseline_label, check.label)
+        _final_value_panel(ax, values, labels)
     else:
         # a byte comparison, an unreadable output, or nothing numeric to show
         ax.axis("off")
-        if check.same:
+        if all(check.same for check in checks):
             ax.text(0.005, 0.9, "the compared outputs are identical", va="top",
                     fontsize=12, fontweight="bold", color=AQUA)
         else:
             ax.text(0.005, 0.9, "no numeric value to compare", va="top",
                     fontsize=12, fontweight="bold", color=INK2)
-            lines = (check.diffs + check.notes)[:6]
+            lines = [line for check in checks
+                     for line in (check.diffs + check.notes)][:6]
             if lines:
                 ax.text(0.005, 0.6, "\n".join(f"\u2022 {line}" for line in lines),
                         va="top", fontsize=9.5, color=OOM_RED, family="monospace")
 
-    problems = []
+    verdict = ""
     if failing:
-        problems.append(f"{len(failing)} outside rtol {rtol:g}")
-    if structural:
-        problems.append(f"{len(structural)} structural")
-    if not problems:
-        verdict = f"\u2713 {check.total} datasets within rtol {rtol:g}"
-    elif check.total:
-        verdict = f"\u2717 {', '.join(problems)} of {check.total} datasets"
+        moved = [f"{check.label}: {len([d for d in check.datasets if d.rel is not None and not d.same])}"
+                 f" outside rtol {rtol:g}"
+                 for check in checks
+                 if any(d.rel is not None and not d.same for d in check.datasets)]
+        verdict = "\u2717 " + "; ".join(moved)
+        if len(checks) == 1:
+            verdict += f" of {checks[0].total} datasets"
+        largest = max((diff.rel for diff in failing), default=None)
+        if largest is not None:
+            verdict += f"   |   largest {largest:.3g}"
+    elif rows:
+        verdict = f"\u2713 {rows} values identical within rtol {rtol:g}"
     else:
-        verdict = f"\u2717 {', '.join(problems)}"
-    if largest is not None:
-        verdict += f"   |   largest {largest:.3g}"
-    fig.suptitle(f"Values at the end of the retrieval — {check.label} vs "
-                 f"{baseline_label}        {verdict}",
-                 color=INK if not problems else OOM_RED, fontsize=11.5, x=0.01,
+        verdict = "\u2713 no numeric value to compare"
+    if structural:
+        verdict += (f"   |   {len(structural)} structural "
+                    f"difference{'s' if len(structural) != 1 else ''}, not compared")
+    # The runs are named in the legend, so the title only has to carry the
+    # verdict: repeating three long labels here pushes it off the figure.
+    # textwrap, not Text(wrap=True): wrapping a figure-level title loops forever
+    # in this matplotlib (`_get_layout` asks for the extent it is computing).
+    fig.suptitle("\n".join(textwrap.wrap(
+                     f"Values at the end of the retrieval — {verdict}", 115)),
+                 color=OOM_RED if failing else INK, fontsize=11.5, x=0.01,
                  ha="left")
 
-    caption = [f"{check.path.name} vs {check.baseline.name}"]
+    caption = [" vs ".join(output_name(path.name, 40) for path in
+                           [checks[0].baseline] + [check.path for check in checks])]
     if structural:
-        caption.append("not plottable: " + "; ".join(structural[:2]))
-    fig.text(0.01, 0.008, " — ".join(caption), fontsize=8.5, color=MUTED, va="bottom")
+        short = [text if len(text) <= 60 else text[:57] + "..."
+                 for text in structural[:2]]
+        caption.insert(0, "not plotted: " + "; ".join(short))
+    fig.text(0.01, 0.008, "\n".join(textwrap.wrap(" — ".join(caption), 165)),
+             fontsize=8.5, color=MUTED, va="bottom")
     fig.tight_layout(rect=(0, 0.035, 1, 0.95))
     save_fig(fig, base)
+
+
+def plot_output_check(check, base: Path, rtol: float, baseline_label: str):
+    """Two runs of :func:`plot_output_checks` — the pairwise entry point."""
+    plot_output_checks([check], base, rtol, [baseline_label, check.label])
 
 
 def print_summary(run: Run, limit_gb: float, project_ranks: int):
@@ -1563,6 +1611,7 @@ def main(argv=None):
             sys.exit(f"ERROR: {exc}")
         if checked_any(checks) or explicit:
             print(format_checks(checks, runs[0].label, args.output_rtol))
+        drawable = []
         for check in checks:
             # a truncated or unreadable output has nothing to draw: it is only
             # reported in the text, there is no comparison to make
@@ -1576,7 +1625,14 @@ def main(argv=None):
             if not args.no_retrieval_plots and compare_retrieval_plots(
                     check, out_root, runs[0].label, stem.name):
                 continue
-            plot_output_check(check, stem, args.output_rtol, runs[0].label)
+            drawable.append(check)
+        if drawable:
+            # One figure for every run that has a comparison to draw: three
+            # builds compared is one picture, not three pairwise ones.
+            labels = [runs[0].label] + [check.label for check in drawable]
+            stem = out_root / ("outputs_"
+                               + "_vs_".join(safe(label) for label in labels))
+            plot_output_checks(drawable, stem, args.output_rtol, labels)
 
     # --compare also draws each run on its own, so the runs are readable one by
     # one before they are overlaid.
