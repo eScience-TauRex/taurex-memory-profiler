@@ -872,6 +872,9 @@ MODEL_AXES = {
     "DirectImageModel": r"$F_p$",
 }
 LINE_STYLES = ("-", "--", "-.", ":")
+# the dark half of the Paired colormap, which is what `taurex-plot` colours with
+PAIRED = plt.get_cmap("Paired")
+RUN_COLOURS = tuple(PAIRED(index) for index in (1, 3, 5, 7, 9, 11))
 # the order `taurex-plot` lists them in, the largest contributor first
 SOURCE_ORDER = ("Absorption", "Rayleigh", "CIA", "Mie")
 
@@ -902,6 +905,8 @@ def read_result(path: Path) -> dict | None:
             "model": _texts(handle["ModelParameters/model_type"])[0],
             "wlgrid": spectra["binned_wlgrid"][()],
             "spectrum": spectra["binned_spectrum"][()],
+            "spectrum_std": (spectra["binned_std"][()]
+                             if "binned_std" in spectra else None),
             # each source is the spectrum with that source alone, so they add up
             # to nothing: they are drawn one line each, never summed
             "sources": {name: source["binned_spectrum"][()]
@@ -912,6 +917,9 @@ def read_result(path: Path) -> dict | None:
             "temperature_std": profiles["temp_profile_std"][()],
             "gases": dict(zip(_texts(chemistry["active_gases"]),
                               profiles["active_mix_profile"][()])),
+            "gases_std": (dict(zip(_texts(chemistry["active_gases"]),
+                                   profiles["active_mix_profile_std"][()]))
+                          if "active_mix_profile_std" in profiles else {}),
             "names": (_texts(optimizer["fit_parameter_names"])
                       if "fit_parameter_names" in optimizer else []),
             "latex": (_texts(optimizer["fit_parameter_latex"])
@@ -927,123 +935,155 @@ def read_result(path: Path) -> dict | None:
     return result
 
 
-def _run_legend(ax, labels, colours, location):
-    """One white-framed legend: a colour per run, so the curves stay readable."""
-    handles = [Line2D([], [], color=colour, label=label)
-               for colour, label in zip(colours, labels)]
-    ax.legend(handles=handles, fontsize=8.5, loc=location, frameon=True,
-              facecolor="white", edgecolor="none", framealpha=0.9,
-              labelcolor=INK2)
-
-
-def _styled_legend(ax, labels, colours, names, location):
-    """Colour = run, line style = species or source, in a single legend."""
-    handles = [Line2D([], [], color=colour, label=label)
-               for colour, label in zip(colours, labels)]
-    handles += [Line2D([], [], color=MUTED, ls=LINE_STYLES[index % len(LINE_STYLES)],
-                       label=name) for index, name in enumerate(names)]
-    ax.legend(handles=handles, fontsize=8.5, loc=location, frameon=True,
-              facecolor="white", edgecolor="none", framealpha=0.9,
-              labelcolor=INK2)
-
-
-def _axes_and_colours(results: dict[str, dict], size):
-    """A framed single axes and one colour per run, in the run order."""
+def _runs(results: dict[str, dict]):
+    """The run labels and the colour of each, in the order the runs are given."""
     labels = list(results)
-    colours = [CYCLE[index % len(CYCLE)] for index in range(len(labels))]
-    fig, ax = plt.subplots(figsize=size)
-    fig.patch.set_facecolor("#fcfcfb")
-    return labels, colours, fig, ax
+    return labels, [RUN_COLOURS[index % len(RUN_COLOURS)] for index in range(len(labels))]
+
+
+def _run_legend(ax, labels, colours, **kwargs):
+    """One entry per run, in the colour of its curve."""
+    handles = [Line2D([], [], color=colour, label=label)
+               for colour, label in zip(colours, labels)]
+    ax.legend(handles=handles, prop={"size": 11}, **kwargs)
+
+
+def _species_handles(names, colours):
+    """One entry per species or opacity source, in its colour."""
+    return [Line2D([], [], color=colour, label=name)
+            for colour, name in zip(colours, names)]
+
+
+def _run_style_handles(labels):
+    """One entry per run, drawn in the line style of its curves."""
+    return [Line2D([], [], color="0.35", ls=LINE_STYLES[index % len(LINE_STYLES)],
+                   label=label) for index, label in enumerate(labels)]
+
+
+def _style_legend(ax, labels, **kwargs):
+    """The runs, told apart by line style, in a small legend of their own.
+
+    It is added as an extra artist, so the legend of the colours (drawn after
+    this one) does not replace it: `ax.legend` keeps only the last legend.
+    """
+    ax.add_artist(ax.legend(handles=_run_style_handles(labels), prop={"size": 9},
+                            frameon=True, facecolor="white", edgecolor="none",
+                            framealpha=0.9, **kwargs))
+
+
+def _observed(ax, observed):
+    """The measured spectrum, drawn the way `taurex-plot` draws it."""
+    ax.errorbar(observed["wlgrid"], observed["spectrum"], observed["errorbars"],
+                lw=1, color="black", alpha=0.4, ls="none", zorder=0, label="Observed")
+    ax.scatter(observed["wlgrid"], observed["spectrum"], marker="d", s=10, zorder=1,
+               edgecolors="grey", c="black")
+
+
+def _wavelength_axis(ax, wlgrid):
+    """The x axis of a spectrum: the observed range, logarithmic when wide."""
+    ax.set_xlim(wlgrid.min() - 0.05 * wlgrid.min(), wlgrid.max() + 0.05 * wlgrid.max())
+    if wlgrid.max() - wlgrid.min() > 5:
+        ax.set_xscale("log")
+    ax.set_xlabel(r"Wavelength ($\mu$m)")
 
 
 def plot_spectrum(results: dict[str, dict], base: Path):
     """The observation once, and the model spectrum of every run on top of it."""
     first = next(iter(results.values()))
-    labels, colours, fig, ax = _axes_and_colours(results, (13, 6.5))
-    width = first["wlgrid"]
+    labels, colours = _runs(results)
+    fig, ax = plt.subplots(figsize=(10.6, 7.0))
 
-    handles = []
-    observed = first.get("observed")
-    if observed:
-        ax.errorbar(observed["wlgrid"], observed["spectrum"], observed["errorbars"],
-                    ls="none", lw=1, color=INK, alpha=0.55)
-        handles.append(Line2D([], [], color=INK, marker="o", ls="none", alpha=0.55,
-                              label="observed"))
+    if first.get("observed"):
+        _observed(ax, first["observed"])
     for label, colour in zip(labels, colours):
         model = results[label]
+        width = model["wlgrid"]
         good = model["spectrum"] > 0
-        ax.plot(model["wlgrid"][good], model["spectrum"][good], color=colour,
-                lw=1.6, label=label)
-        handles.append(Line2D([], [], color=colour, label=label))
+        ax.plot(width[good], model["spectrum"][good], color=colour, label=label)
+        # the fitted spectrum carries its own error, as in `taurex-plot`: one and
+        # two sigma, drawn behind the curve
+        if model.get("spectrum_std") is not None:
+            error = model["spectrum_std"]
+            ax.fill_between(width[good], model["spectrum"][good] - error[good],
+                            model["spectrum"][good] + error[good], alpha=0.2,
+                            zorder=-2, color=colour, edgecolor="none")
+            ax.fill_between(width[good], model["spectrum"][good] - 2 * error[good],
+                            model["spectrum"][good] + 2 * error[good], alpha=0.1,
+                            zorder=-3, color=colour, edgecolor="none")
 
-    ax.set_yscale("log")
-    if width.max() - width.min() > 5:
-        ax.set_xscale("log")
-    style(ax, "Spectrum", xlabel=r"wavelength [$\mu$m]",
-          ylabel=MODEL_AXES.get(first["model"], "model"))
-    ax.legend(handles=handles, fontsize=9, loc="upper right", frameon=True,
-              facecolor="white", edgecolor="none", framealpha=0.9, labelcolor=INK2)
+    _wavelength_axis(ax, first["wlgrid"])
+    ax.set_ylabel(MODEL_AXES.get(first["model"], ""))
+    ax.legend(loc="best", ncol=2, frameon=False, prop={"size": 11})
     fig.tight_layout()
     save_fig(fig, base)
 
 
 def plot_contributions(results: dict[str, dict], base: Path):
-    """Every opacity source once per run: colour is the run, style the source."""
+    """Every opacity source once per run: colour is the source, style the run."""
     first = next(iter(results.values()))
-    labels, colours, fig, ax = _axes_and_colours(results, (13, 6.5))
+    labels, _ = _runs(results)
+    fig, ax = plt.subplots(figsize=(10.6, 7.0))
     sources = sorted(dict.fromkeys(name for label in labels
                                    for name in results[label]["sources"]),
                      key=lambda name: (SOURCE_ORDER.index(name)
                                        if name in SOURCE_ORDER else len(SOURCE_ORDER),
                                        name))
-    for label, colour in zip(labels, colours):
+    colours = [f"C{index}" for index in range(len(sources))]
+    for run_index, label in enumerate(labels):
         model = results[label]
         for index, name in enumerate(sources):
             source = model["sources"].get(name)
             if source is None:
                 continue
             good = source > 0
-            ax.plot(model["wlgrid"][good], source[good], color=colour,
-                    ls=LINE_STYLES[index % len(LINE_STYLES)], lw=1.2)
+            ax.plot(model["wlgrid"][good], source[good], color=colours[index],
+                    ls=LINE_STYLES[run_index % len(LINE_STYLES)])
 
-    if all(np.all(model["sources"][name] > 0)
-           for model in results.values() for name in model["sources"]):
-        ax.set_yscale("log")
-    width = first["wlgrid"]
-    if width.max() - width.min() > 5:
-        ax.set_xscale("log")
-    style(ax, "Contributions (one source at a time)",
-          xlabel=r"wavelength [$\mu$m]",
-          ylabel=MODEL_AXES.get(first["model"], "model"))
-    _styled_legend(ax, labels, colours, sources, "lower right")
-    fig.tight_layout()
+    _wavelength_axis(ax, first["wlgrid"])
+    ax.set_ylabel(MODEL_AXES.get(first["model"], ""))
+    _style_legend(ax, labels, loc="upper right")
+    # `taurex-plot` keeps this legend below the axes, where it does not cover
+    # the curves; the axes are shrunk to make room for it
+    ax.legend(handles=_species_handles(sources, colours),
+              loc="upper center", bbox_to_anchor=(0.5, -0.08), fancybox=True,
+              shadow=True, ncol=len(sources), prop={"size": 11})
+    fig.tight_layout(rect=(0, 0.08, 1, 1))
     save_fig(fig, base)
 
 
 def plot_tp_profile(results: dict[str, dict], base: Path):
     """Temperature against pressure, one line and one ±1σ band per run."""
-    labels, colours, fig, ax = _axes_and_colours(results, (7.5, 6.5))
+    labels, colours = _runs(results)
+    fig, ax = plt.subplots(figsize=(5, 3.5))
     for label, colour in zip(labels, colours):
         model = results[label]
         pressure = model["pressure"]
-        ax.plot(model["temperature"], pressure, color=colour, lw=1.8, label=label)
+        ax.plot(model["temperature"], pressure, color=colour, label=label)
+        # `taurex-plot` fills the ±1σ band at 0.5 for one run; the same opacity
+        # spread over the runs that are compared
         ax.fill_betweenx(pressure, model["temperature"] - model["temperature_std"],
                          model["temperature"] + model["temperature_std"],
-                         color=colour, alpha=0.10, lw=0)
+                         color=colour, alpha=0.5 / len(labels), edgecolor="none")
     ax.set_yscale("log")
     ax.invert_yaxis()
-    style(ax, "Temperature profile", xlabel="temperature [K]", ylabel="pressure [bar]")
-    _run_legend(ax, labels, colours, "upper left")
+    ax.set_xlabel("Temperature (K)")
+    ax.set_ylabel("Pressure (bar)")
+    legend = ax.legend(loc="upper left", prop={"size": 11})
+    legend.get_frame().set_facecolor("white")
+    legend.get_frame().set_edgecolor("white")
+    legend.get_frame().set_alpha(0.8)
     fig.tight_layout()
     save_fig(fig, base)
 
 
 def plot_mixratios(results: dict[str, dict], base: Path):
-    """Every active gas once per run: colour is the run, style the gas."""
+    """Every active gas once per run: colour is the gas, style the run."""
     first = next(iter(results.values()))
-    labels, colours, fig, ax = _axes_and_colours(results, (8.5, 6.5))
+    labels, _ = _runs(results)
+    fig, ax = plt.subplots(figsize=(7, 7 / 1.618))
     gases = list(first["gases"])
-    for label, colour in zip(labels, colours):
+    colours = [PAIRED(index / max(len(gases), 1)) for index in range(len(gases))]
+    for run_index, label in enumerate(labels):
         model = results[label]
         pressure = model["pressure"]
         for index, gas in enumerate(gases):
@@ -1051,15 +1091,44 @@ def plot_mixratios(results: dict[str, dict], base: Path):
             if profile is None:
                 continue
             good = profile > 0
-            ax.plot(profile[good], pressure[good], color=colour,
-                    ls=LINE_STYLES[index % len(LINE_STYLES)], lw=1.3)
+            ax.plot(profile[good], pressure[good], color=colours[index],
+                    ls=LINE_STYLES[run_index % len(LINE_STYLES)])
+            spread = model.get("gases_std", {}).get(gas)
+            if spread is not None:
+                ax.fill_betweenx(pressure[good], profile[good] - spread[good],
+                                 profile[good] + spread[good], color=colours[index],
+                                 alpha=0.1, edgecolor="none")
     ax.set_xscale("log")
     ax.set_yscale("log")
     ax.invert_yaxis()
-    style(ax, "Mixing ratios (active)", xlabel="mixing ratio", ylabel="pressure [bar]")
-    _styled_legend(ax, labels, colours, gases, "lower left")
-    fig.tight_layout()
+    ax.set_xlim(1e-12, 3)
+    ax.set_xlabel("Mixing ratio")
+    ax.set_ylabel("Pressure (bar)")
+    # the gases sit outside the axes (their names are short), the runs inside,
+    # because their labels are long; no tight_layout, the legend is an axes child
+    # and would squeeze the axes to make room for itself
+    _style_legend(ax, labels, loc="lower left")
+    ax.legend(handles=_species_handles(gases, colours), loc="center left",
+              bbox_to_anchor=(1.02, 0.5), ncol=1, frameon=False, prop={"size": 11})
+    fig.subplots_adjust(left=0.12, right=0.72, top=0.97, bottom=0.16)
     save_fig(fig, base)
+
+
+def _weighted_range(samples, weights, limits=(0.001, 0.999)):
+    """The range that holds the posterior, so the bins are not wasted on its tails.
+
+    A converged retrieval is far narrower than the widest sample it drew; binning
+    from the minimum to the maximum would put the whole posterior in one bin.
+    """
+    order = np.argsort(samples)
+    ordered, mass = samples[order], weights[order]
+    cumulative = np.cumsum(mass) / np.sum(mass)
+    low, high = np.interp(limits, cumulative, ordered)
+    if not high > low:                      # all the weight on one value
+        low, high = ordered.min(), ordered.max()
+    if not high > low:
+        low, high = low - 0.5, high + 0.5
+    return float(low), float(high)
 
 
 def plot_posteriors(results: dict[str, dict], base: Path):
@@ -1070,32 +1139,44 @@ def plot_posteriors(results: dict[str, dict], base: Path):
         print("  no posterior plotted: the outputs carry no tracedata")
         return
     first = next(iter(with_samples.values()))
-    labels = list(with_samples)
-    colours = [CYCLE[index % len(CYCLE)] for index in range(len(labels))]
+    labels, colours = _runs(with_samples)
     names, latex = first["names"], first["latex"] or first["names"]
     columns = 4
     rows = int(np.ceil(len(names) / columns))
     fig, axes = plt.subplots(rows, columns, figsize=(4.0 * columns, 2.9 * rows),
                              squeeze=False)
-    fig.patch.set_facecolor("#fcfcfb")
     for index, name in enumerate(names):
         ax = axes[index // columns][index % columns]
+        histograms = []
         for label, colour in zip(labels, colours):
             model = with_samples[label]
             if name not in model["names"]:
                 continue
             column = model["names"].index(name)
-            ax.hist(model["tracedata"][:, column], bins=40,
-                    weights=model["weights"], density=True, histtype="step",
-                    color=colour, lw=1.5, label=label)
-        style(ax, latex[index] if index < len(latex) else name, xlabel=name,
-              ylabel="density")
-    for index in range(len(names), rows * columns):
-        axes[index // columns][index % columns].axis("off")
-    _run_legend(axes[0][0], labels, colours, "upper right")
-    fig.suptitle("Posteriors of the fitted parameters", color=INK, fontsize=13,
-                 x=0.01, ha="left")
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
+            samples = model["tracedata"][:, column]
+            histograms.append((model["weights"], samples,
+                               _weighted_range(samples, model["weights"]), colour))
+        low = min(span[0] for _w, _s, span, _c in histograms)
+        high = max(span[1] for _w, _s, span, _c in histograms)
+        for weights, samples, _span, colour in histograms:
+            ax.hist(samples, bins=40, range=(low, high), weights=weights,
+                    density=True, histtype="step", color=colour)
+        ax.set_title(latex[index] if index < len(latex) else name)
+        ax.set_xlabel(name)
+        ax.set_ylabel("density")
+
+    free = [axes[index // columns][index % columns]
+            for index in range(len(names), rows * columns)]
+    for ax in free:
+        ax.axis("off")
+    # the run legend goes into the empty panel, so it covers no posterior
+    target = free[0] if free else axes[0][0]
+    if free:
+        target.axis("on")
+        target.set_xticks([])
+        target.set_yticks([])
+    _run_legend(target, labels, colours, loc="center left", frameon=False)
+    fig.tight_layout()
     save_fig(fig, base)
 
 

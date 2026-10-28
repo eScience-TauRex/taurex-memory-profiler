@@ -381,9 +381,13 @@ one curve per run:
 | `compare_mixratios_*.png` | the active gases against pressure, per run |
 | `compare_posteriors_*.png` | the sampled posterior of every fitted parameter, one histogram per run |
 
-Colour is the run; where a figure also carries several species or sources, the
-line style distinguishes them and the legend lists both. The quantities are the
-ones `taurex-plot -x -t -s -c -C` draws.
+The figures keep the `taurex-plot` style — same sizes, axis labels, scales, the
+`Paired` colours, the ±1σ/±2σ spectrum bands and the same legend placement — so a
+comparison figure reads like the plot of one output, with the other runs added.
+In the spectrum, temperature and posterior figures the colour is the run; in the
+contributions and mixing-ratios figures the colour is the source or the gas, as in
+`taurex-plot`, and the line style distinguishes the runs (solid, dashed,
+dash-dot), with a second legend for it.
 
 The output is the `-o` of the command recorded in each run's `run_<jobid>.meta`,
 looked up next to the logs and one directory up; the runs do not have to share

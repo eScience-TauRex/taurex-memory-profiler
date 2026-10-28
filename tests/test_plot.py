@@ -410,18 +410,21 @@ def test_results_comparison_overlays_the_runs():
     spectrum = captured[0][0].axes[0]
     # one observation + one model curve per run, on the same axis
     assert len(spectrum.lines) == 3, [line.get_label() for line in spectrum.lines]
-    assert [text.get_text() for text in spectrum.get_legend().get_texts()] == \
-        ["observed", "a", "b"]
+    assert set(text.get_text() for text in spectrum.get_legend().get_texts()) == \
+        {"Observed", "a", "b"}
     assert len(captured[1][0].axes[0].lines) == 4, "2 sources x 2 runs"
     assert len(captured[2][0].axes[0].lines) == 2
     mixing = captured[3][0].axes[0]
     assert len(mixing.lines) == 4, "2 gases x 2 runs"
-    # colour = run, line style = source or gas
-    legend = [text.get_text() for text in mixing.get_legend().get_texts()]
-    assert legend == ["a", "b", "H2O", "CH4"], legend
+    # colour = gas (the legend of the axes), line style = run (an extra artist)
+    assert [text.get_text() for text in mixing.get_legend().get_texts()] == ["H2O", "CH4"]
+    run_legend = [artist for artist in mixing.artists
+                  if hasattr(artist, "get_texts")][0]
+    assert [text.get_text() for text in run_legend.get_texts()] == ["a", "b"]
     # one histogram per run in the posterior of the one fitted parameter
-    posterior = captured[4][0].axes[0]
-    assert len(posterior.get_legend().get_texts()) == 2
+    posteriors = captured[4][0]
+    legend = next(ax.get_legend() for ax in posteriors.axes if ax.get_legend() is not None)
+    assert [text.get_text() for text in legend.get_texts()] == ["a", "b"]
     plt.close("all")
 
 
