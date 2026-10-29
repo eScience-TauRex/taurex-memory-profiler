@@ -416,7 +416,11 @@ A `[LABEL=]FILE` applies to that run, a plain `FILE` to every run;
 
 This needs `h5py` and a retrieval that *ran to the end*: `--light` writes only
 `ModelParameters`, and such an output is named and skipped (for a run that is
-meant to finish, drop `--light`: `LIGHT=0 ./submit.sh 2 64 50`). Nothing is
+meant to finish, drop `--light`: `LIGHT=0 ./submit.sh 2 64 50`). When the
+`-o` of a run is `--light`, the plotter looks for a finished output with the
+same file name next to the logs and in `tmp_postprocess/` — which is where
+`submit_postprocess.sh` writes the chain it finishes — and says which file it
+drew instead of the light one. Nothing is
 written into the log directory apart from the figure itself.
 
 ### Read the comparison
@@ -496,8 +500,8 @@ The CSVs are written and flushed sample by sample, so they survive an OOM kill.
   comparison needs two or more runs.
 * **No results comparison** — the tool names the run and the reason: no output
   file recorded in its `run_<jobid>.meta` (pass `--output [LABEL=]FILE`), or a
-  `--light` output, which holds no retrieval to draw. `--no-results` skips the
-  comparison.
+  `--light` output with no finished output of the same name in the directories
+  it searches. `--no-results` skips the comparison.
 * **`--select` matches nothing** — it matches the label from
   `run_<jobid>.meta` or the job id; the error lists what is available.
 * **`pss_kb` is 0 for some processes** — `/proc/<pid>/smaps_rollup` was not

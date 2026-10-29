@@ -1203,6 +1203,28 @@ def plot_posteriors(results: dict[str, dict], base: Path):
     save_fig(fig, base)
 
 
+def finished_output(run: Run, output: Path) -> Path | None:
+    """A finished output with the same name, when `output` is a ``--light`` one.
+
+    A ``--light`` run writes only ``ModelParameters``, and the finished chain of
+    the same retrieval keeps the same file name (``submit_postprocess.sh`` writes
+    ``tmp_postprocess/output_<TAG>.hdf5`` for the ``-o
+    output_<TAG>.hdf5`` of the run). Looking for that file next to the logs and
+    in ``tmp_postprocess/`` is what makes the results figures appear for a run
+    that was monitored while it was only sampling.
+    """
+    name = output.name
+    base = Path(run.source).expanduser()
+    base = base if base.is_dir() else base.parent
+    candidates = [base, base.parent, base.parent / "tmp_postprocess",
+                  Path.cwd(), Path.cwd() / "tmp_postprocess"]
+    for root in candidates:
+        candidate = root / name
+        if candidate.is_file() and candidate.resolve() != output.resolve():
+            return candidate
+    return None
+
+
 def compare_results(runs: list[Run], out_root: Path,
                     explicit: dict[str | None, Path] | None = None):
     """Read every run's results and write one comparison figure per quantity."""
@@ -1215,6 +1237,16 @@ def compare_results(runs: list[Run], out_root: Path,
                   "is not next to the logs (pass the output with --output)")
             continue
         result = read_result(output)
+        if result is None:
+            # the -o of a --light run has no results; the finished chain of the
+            # same retrieval has the same name, and that is what the figures
+            # are drawn from
+            other = finished_output(run, output)
+            if other is not None:
+                result = read_result(other)
+                if result is not None:
+                    print(f"  {run.label}: {output.name} is --light, "
+                          f"drawing {other}")
         if result is None:
             print(f"  no results for {run.label}: {output.name} has no 'Output' group, "
                   "which a --light run does not write (re-run it without --light, or "

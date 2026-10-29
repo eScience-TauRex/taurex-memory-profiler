@@ -474,6 +474,27 @@ def test_results_comparison_overlays_the_runs():
     plt.close("all")
 
 
+def test_finished_output_falls_back_for_a_light_run():
+    """A --light -o is replaced by the finished chain that has the same name."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        logs = tmp / "memory_logs"
+        logs.mkdir()
+        (tmp / "output_run.hdf5").write_bytes(b"light")
+        (tmp / "tmp_postprocess").mkdir()
+        finished = tmp / "tmp_postprocess" / "output_run.hdf5"
+        finished.write_bytes(b"finished")
+
+        sys.path.insert(0, str(SRC))
+        from taurex_memory_profiler import plot as plotmod
+
+        run = plotmod.Run(label="run", source=str(logs))
+        assert plotmod.finished_output(run, tmp / "output_run.hdf5") == finished
+        # no finished counterpart: nothing is substituted
+        (tmp / "other.hdf5").write_bytes(b"light")
+        assert plotmod.finished_output(run, tmp / "other.hdf5") is None
+
+
 def test_read_result_of_a_light_output():
     """An output without the forward 'Output' group has no results to draw."""
     try:
