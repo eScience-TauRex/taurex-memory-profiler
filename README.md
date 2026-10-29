@@ -209,7 +209,8 @@ job unless `--job` or `--select` is given.
 |---|---|
 | `--compare RUN` | overlay another run, by name or path (repeatable, several at once) |
 | `--compare2 RUN` | third run (shorthand) |
-| `--label NAME`, `--label-a/-b/-c NAME` | labels for the runs |
+| `--labels A B ...` | labels of the runs, in the order the runs are given (repeatable) |
+| `--label NAME`, `--label-a/-b/-c NAME` | a label for one run (`-a/-b/-c` are the legacy names) |
 | `--job ID` | one job inside a log directory |
 | `--select GLOB` | every run in the directory whose label or job id matches |
 | `--logdir DIR` | directory scanned when no RUN is given |
@@ -335,7 +336,19 @@ taurex-mem-plot mem_64_good --compare mem_64_bad
 ```
 
 Labels on the figures default to the run names, so the plot is readable without
-renaming anything afterwards. Each compared run is plotted on its own first
+renaming anything afterwards. To name the runs yourself, give `--labels` the
+same number of labels as there are runs, in the order the runs are given
+(positional runs first, then `--compare`, then `--compare2`):
+
+```bash
+# the legend reads "OOM branch" and "original taurex3" instead of the file names
+taurex-mem-plot mem_64.csv --compare mem_64_bad.csv \
+    --labels "OOM branch" "original taurex3"
+```
+
+A `LABEL=PATH` in the run itself still wins over `--labels`, so a single run can
+be renamed where it is written. Runs without a label keep their default name.
+Each compared run is plotted on its own first
 (`memory_<name>.png` and `memory_<name>_total.png`), and the `compare_*.png`
 overlay is written last.
 

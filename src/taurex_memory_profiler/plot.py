@@ -33,6 +33,10 @@ taurex-mem-plot mem_64.csv --compare mem_64_bad.csv \
 # same axes, one curve per run)
 taurex-mem-plot --compare mem_64_good mem_64_bad
 
+# the labels of all the compared runs, in the order the runs are given
+taurex-mem-plot --compare mem_64_good mem_64_bad \
+    --labels "OOM branch" "original taurex3"
+
 # several unified log directories, labelled
 taurex-mem-plot good=logs_good --compare bad=logs_bad --compare2 f32=logs_f32
 
@@ -1400,6 +1404,10 @@ def parse_args(argv=None):
                         help="plot every run in the directory whose label matches "
                              "(e.g. 'mem_64_*'), instead of a single job")
     parser.add_argument("--label", default=None, help="label of the run")
+    parser.add_argument("--labels", action="append", nargs="+", default=None, metavar="LABEL",
+                        help="labels of the compared runs, in the order the runs are given; "
+                             "the option may be repeated and runs without a label keep their "
+                             "default name")
     parser.add_argument("--label-a", default=None, help="label of the first run (legacy)")
     parser.add_argument("--label-b", default=None, help="label of the second run (legacy)")
     parser.add_argument("--label-c", default=None, help="label of the third run (legacy)")
@@ -1468,10 +1476,19 @@ def collect_specs(args):
         raw += [(None, s) for group in args.compare for s in group]
     if args.compare2:
         raw.append((None, args.compare2))
+
+    # one label per run on the command line, in the order the runs are given
+    wanted = [lbl for group in (args.labels or []) for lbl in group]
+    if len(wanted) > len(raw) and raw:
+        sys.exit(f"ERROR: {len(wanted)} labels for {len(raw)} runs")
+
     if not raw:
         # No explicit run: use the log directory, either picking one job
         # (--job / latest) or every run whose label matches --select.
-        return [(args.label, Path(args.logdir).expanduser(), args.job)], args.job
+        if len(wanted) > 1:
+            sys.exit(f"ERROR: {len(wanted)} labels for one run")
+        chosen = wanted[0] if wanted else args.label
+        return [(chosen, Path(args.logdir).expanduser(), args.job)], args.job
 
     labels = [args.label_a, args.label_b, args.label_c]
     specs = []
@@ -1479,6 +1496,8 @@ def collect_specs(args):
         spec_label, path, job = split_spec(spec)
         if spec_label:
             chosen = spec_label
+        elif i < len(wanted):
+            chosen = wanted[i]
         elif i < len(labels) and labels[i]:
             chosen = labels[i]
         else:

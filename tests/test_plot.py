@@ -152,6 +152,34 @@ def test_compare_three_way():
         assert "peak:" in out
 
 
+def test_labels_option_names_the_compared_runs():
+    """--labels gives one label per run, in the order the runs are given."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        write_legacy(tmp / "mem_64.csv")
+        write_legacy(tmp / "mem_64_bad.csv")
+        write_legacy(tmp / "mem_64_f32.csv")
+        out = run_plot(tmp / "mem_64.csv", "--compare", tmp / "mem_64_bad.csv",
+                       tmp / "mem_64_f32.csv",
+                       "--labels", "OOM branch", "original taurex3", "float32",
+                       "--output-dir", tmp)
+        assert (tmp / "compare_OOM_branch_vs_original_taurex3_vs_float32.png").is_file(), out
+        # the labels reach the figures of the single runs and the peak table
+        assert (tmp / "memory_OOM_branch_total.png").is_file(), out
+        assert "OOM branch" in out and "float32" in out, out
+
+        # the label written into the run itself wins over --labels
+        out = run_plot(f"fixed={tmp / 'mem_64.csv'}", "--compare", tmp / "mem_64_bad.csv",
+                       "--labels", "ignored", "OOM branch", "--output-dir", tmp)
+        assert (tmp / "compare_fixed_vs_OOM_branch.png").is_file(), out
+
+        # more labels than runs is a mistake, not a silently ignored label
+        proc = call([*PLOT, str(tmp / "mem_64.csv"), "--compare", str(tmp / "mem_64_bad.csv"),
+                     "--labels", "a", "b", "c", "--output-dir", str(tmp)])
+        assert proc.returncode != 0
+        assert "3 labels for 2 runs" in proc.stderr
+
+
 def test_figures_go_to_cwd_when_runs_span_directories():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
