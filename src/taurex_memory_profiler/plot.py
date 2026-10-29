@@ -728,7 +728,9 @@ def plot_overview(run: Run, base: Path, limit_gb: float, project_ranks: int,
         axes[rows.index("ranks"), 0].set_ylim(0, (top_rank * 1.3) if top_rank > 0 else 1)
     axes[0, 0].set_xlim(left=0)
 
-    fig.suptitle(title or f"Memory — {run.label}", x=0.01, ha="left", fontsize=14, color=INK)
+    # the run label stays on the figure even when --title gives a custom title
+    caption = f"{title} — {run.label}" if title else f"Memory — {run.label}"
+    fig.suptitle(caption, x=0.01, ha="left", fontsize=14, color=INK)
     fig.tight_layout(rect=(0, 0, 1, 0.96))
     save_fig(fig, base)
 
@@ -823,7 +825,9 @@ def plot_compare(runs: list[Run], base: Path, title: str | None = None):
     ax.set_ylabel("Total memory (GB)", color=INK2, fontsize=10)
     if any(r.killed for r in runs):
         ax.scatter([], [], marker="X", s=140, color=OOM_RED, label="✕ = OOM KILLED")
-    style(ax, title or ("Memory comparison: " + ", ".join(r.label for r in runs)))
+    # --title is added to the names of the runs, it does not replace them
+    caption = "Memory comparison: " + ", ".join(r.label for r in runs)
+    style(ax, f"{title} — {caption}" if title else caption)
     handles, labels = ax.get_legend_handles_labels()
     if handles:
         ax.legend(frameon=False, labelcolor=INK2)
@@ -945,6 +949,16 @@ def _runs(results: dict[str, dict]):
     return labels, [RUN_COLOURS[index % len(RUN_COLOURS)] for index in range(len(labels))]
 
 
+def _run_title(fig, what: str, labels, size: float = 13.0) -> None:
+    """Name the runs on the figure itself, so a saved PNG says what it compares.
+
+    The legends of these figures already carry the labels next to the colours;
+    the title repeats them, so the labels are on every figure and not only in
+    the names of the files.
+    """
+    fig.suptitle(f"{what} — {', '.join(labels)}", fontsize=size, color=INK)
+
+
 def _run_legend(ax, labels, colours, **kwargs):
     """One entry per run, in the colour of its curve."""
     handles = [Line2D([], [], color=colour, label=label)
@@ -1018,7 +1032,8 @@ def plot_spectrum(results: dict[str, dict], base: Path):
     _wavelength_axis(ax, first["wlgrid"])
     ax.set_ylabel(MODEL_AXES.get(first["model"], ""))
     ax.legend(loc="best", ncol=2, frameon=False, prop={"size": 11})
-    fig.tight_layout()
+    _run_title(fig, "Spectrum", labels)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
     save_fig(fig, base)
 
 
@@ -1051,7 +1066,8 @@ def plot_contributions(results: dict[str, dict], base: Path):
     ax.legend(handles=_species_handles(sources, colours),
               loc="upper center", bbox_to_anchor=(0.5, -0.08), fancybox=True,
               shadow=True, ncol=len(sources), prop={"size": 11})
-    fig.tight_layout(rect=(0, 0.08, 1, 1))
+    _run_title(fig, "Opacity contributions", labels)
+    fig.tight_layout(rect=(0, 0.08, 1, 0.94))
     save_fig(fig, base)
 
 
@@ -1076,7 +1092,8 @@ def plot_tp_profile(results: dict[str, dict], base: Path):
     legend.get_frame().set_facecolor("white")
     legend.get_frame().set_edgecolor("white")
     legend.get_frame().set_alpha(0.8)
-    fig.tight_layout()
+    _run_title(fig, "Temperature–pressure profile", labels, size=9.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.95))
     save_fig(fig, base)
 
 
@@ -1114,7 +1131,8 @@ def plot_mixratios(results: dict[str, dict], base: Path):
     _style_legend(ax, labels, loc="lower left")
     ax.legend(handles=_species_handles(gases, colours), loc="center left",
               bbox_to_anchor=(1.02, 0.5), ncol=1, frameon=False, prop={"size": 11})
-    fig.subplots_adjust(left=0.12, right=0.72, top=0.97, bottom=0.16)
+    _run_title(fig, "Mixing ratios", labels, size=10.0)
+    fig.subplots_adjust(left=0.12, right=0.72, top=0.92, bottom=0.16)
     save_fig(fig, base)
 
 
@@ -1180,7 +1198,8 @@ def plot_posteriors(results: dict[str, dict], base: Path):
         target.set_xticks([])
         target.set_yticks([])
     _run_legend(target, labels, colours, loc="center left", frameon=False)
-    fig.tight_layout()
+    _run_title(fig, "Posteriors", labels)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
     save_fig(fig, base)
 
 
@@ -1472,6 +1491,10 @@ def is_run_name(path: Path) -> bool:
 
 def collect_specs(args):
     raw = [(None, s) for s in args.runs]
+    # --job names a run of the log directory; it is a run of the comparison even
+    # when only --compare runs are listed next to it
+    if not raw and args.job is not None:
+        raw.append((None, str(Path(args.logdir).expanduser())))
     if args.compare:
         raw += [(None, s) for group in args.compare for s in group]
     if args.compare2:
@@ -1540,6 +1563,21 @@ def prune_duplicate_runs(runs: list[Run], policy: str | None) -> list[Run]:
     return [run for index, run in enumerate(runs) if index not in dropped]
 
 
+def apply_label(built: list[Run], label: str | None, where) -> None:
+    """Give the runs of one command-line spec the label of that spec.
+
+    A spec expands to several runs only through --select, which is a whole grid
+    of runs; one label cannot name those, so it is an error rather than a figure
+    where every curve carries the same name.
+    """
+    if not label:
+        return
+    if len(built) > 1:
+        sys.exit(f"ERROR: the label '{label}' would name {len(built)} runs of {where}; "
+                 "give each run its own LABEL=PATH#JOBID")
+    built[0].label = label
+
+
 def main(argv=None):
     args = parse_args(argv)
     specs, job = collect_specs(args)
@@ -1548,23 +1586,21 @@ def main(argv=None):
     logdir = Path(args.logdir).expanduser()
     for label, path, spec_job in specs:
         if path.exists():
-            # --select applies to the directory the run spec points at.
+            # --select applies to the directory the run spec points at, and it
+            # wins over --job: a pattern selects several runs, one job is one.
             select = args.select if path.is_dir() else None
-            built = build_runs(path, spec_job if spec_job is not None else job, select=select)
+            wanted_job = spec_job if spec_job is not None else (None if select else job)
+            built = build_runs(path, wanted_job, select=select)
             if not built:
                 sys.exit(f"ERROR: no memory logs found in {path}")
-            if label and not select:
-                for run in built:
-                    run.label = label
+            apply_label(built, label, path)
         elif is_run_name(path):
             # A bare name is a run label inside --logdir, so runs are compared
             # by name without needing their job ids.
             built = build_runs(logdir, spec_job, select=str(path))
             if not built:
                 sys.exit(f"ERROR: no run named '{path}' in {logdir}")
-            if label:
-                for run in built:
-                    run.label = label
+            apply_label(built, label, path)
         else:
             sys.exit(f"ERROR: {path} not found")
         runs += built

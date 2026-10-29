@@ -180,6 +180,20 @@ def test_labels_option_names_the_compared_runs():
         assert "3 labels for 2 runs" in proc.stderr
 
 
+def test_job_is_a_run_of_the_comparison():
+    """--job names the first run even when only --compare runs are listed."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        logs = Path(tmp) / "memory_logs"
+        for job, label in (("111", "one"), ("222", "two"), ("333", "three")):
+            write_unified(logs, job=job, label=label)
+        out = run_plot("--logdir", logs, "--job", "111", "--compare", "222", "333",
+                       "--labels", "A", "B", "C", "--output-dir", tmp)
+        assert (tmp / "compare_A_vs_B_vs_C.png").is_file(), out
+        for label in ("A", "B", "C"):
+            assert (tmp / f"memory_{label}_total.png").is_file(), (label, out)
+
+
 def test_figures_go_to_cwd_when_runs_span_directories():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -453,6 +467,10 @@ def test_results_comparison_overlays_the_runs():
     posteriors = captured[4][0]
     legend = next(ax.get_legend() for ax in posteriors.axes if ax.get_legend() is not None)
     assert [text.get_text() for text in legend.get_texts()] == ["a", "b"]
+    # every results figure names the runs in its title, not only in the legend
+    for fig, base in captured:
+        texts = " ".join(text.get_text() for text in fig.texts)
+        assert "— a, b" in texts, (base.name, texts)
     plt.close("all")
 
 
