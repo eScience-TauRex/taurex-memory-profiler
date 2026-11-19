@@ -227,15 +227,19 @@ job unless `--job` or `--select` is given.
 | `--no-results` | do not draw the results of the compared runs |
 | `--output-dir DIR` | where to write the figures |
 | `--killed` / `--not-killed` | force the OOM marker instead of auto-detecting it |
-| `--delete-old` / `--keep-old` | what to do when several runs share a name: delete the older ones, or keep them, without asking |
+| `--delete-old` / `--keep-old` | what to do when several runs share a name: delete the older ones (**the default**), or keep them |
 
 Two runs with the same name would write the same figures, so when the name of a
 run appears on another run in its log directory only the most recent one is
-plotted and the older ones are offered for deletion (their logs, their
-`run_<jobid>.meta` and the figures named after that label). That also happens
-when a single job is picked with `--job` or by taking the newest run of the
-directory: the other runs of its name are what would overwrite its figures.
-Without a terminal to ask on the older runs are kept, and the note says so.
+plotted and the older ones are deleted (their logs, their `run_<jobid>.meta`
+and the figures named after that label). That also happens when a single job is
+picked with `--job` or by taking the newest run of the directory: the other runs
+of its name are what would overwrite its figures. The deletion happens before
+the run labels are applied, so `--compare mem_good --labels old` plots the
+newest run named `mem_good` as `old` instead of refusing the label because the
+name also matches the runs it replaced. A run renamed on the command line
+(`--compare new=mem_good#28469912`) writes under another name, so it is not
+pruned and every run of the name is kept. `--keep-old` keeps them all instead.
 
 ### What you get
 

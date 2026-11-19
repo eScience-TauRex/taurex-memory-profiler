@@ -541,27 +541,49 @@ def test_read_result_of_a_light_output():
         assert result["observed"]["spectrum"].size == 4
 
 
-def test_duplicate_run_names_ask_before_deleting():
-    """Two runs with one name: the plotter keeps both with a note when nobody
-    can be asked, and drops the older one on --delete-old."""
+def test_duplicate_run_names_drop_the_older_run():
+    """Two runs with one name: the older one is deleted, so only the newest is
+    plotted; --keep-old keeps both."""
     with tempfile.TemporaryDirectory() as tmp:
         logs = Path(tmp) / "memory_logs"
         write_unified(logs, job="111", label="twice")
         write_unified(logs, job="222", label="twice")
 
-        # no terminal: both runs stay
-        out = run_plot("--logdir", logs, "--select", "twice", "--output-dir", logs)
-        assert "2 runs are labelled 'twice'" in out, out
-        assert (logs / "run_111.meta").exists() and (logs / "run_222.meta").exists()
-
         # the older run is the one written first, and only it goes
-        out = run_plot("--logdir", logs, "--select", "twice", "--output-dir", logs,
-                       "--delete-old")
+        out = run_plot("--logdir", logs, "--select", "twice", "--output-dir", logs)
         assert "Deleted the old run 111" in out, out
         assert not (logs / "run_111.meta").exists()
         assert not list(logs.glob("*_111_*.csv"))
         assert (logs / "run_222.meta").exists()
         assert (logs / "memory_twice.png").is_file()
+
+        # --keep-old plots the newest run and leaves the other one alone
+        write_unified(logs, job="111", label="twice")
+        out = run_plot("--logdir", logs, "--select", "twice", "--output-dir", logs,
+                       "--keep-old")
+        assert "Deleted" not in out, out
+        assert (logs / "run_111.meta").exists() and (logs / "run_222.meta").exists()
+
+
+def test_label_of_a_name_with_old_runs_names_the_survivor():
+    """A name that matches three jobs, two of them replaced runs, still takes
+    the label of the comparison: the old runs go before the label is applied."""
+    with tempfile.TemporaryDirectory() as tmp:
+        logs = Path(tmp) / "memory_logs"
+        write_unified(logs, job="111", label="smc")
+        write_unified(logs, job="222", label="smc")
+        write_unified(logs, job="333", label="smc")
+        write_unified(logs, job="444", label="other")
+
+        out = run_plot("--logdir", logs, "--output-dir", logs,
+                       "--compare", "smc", "other", "--labels", "jax_smc", "jax_other")
+        assert "would name" not in out, out
+        assert "Deleted the old run 111" in out, out
+        assert "Deleted the old run 222" in out, out
+        assert (logs / "run_333.meta").exists()
+        assert not (logs / "run_111.meta").exists()
+        assert not (logs / "run_222.meta").exists()
+        assert (logs / "compare_jax_smc_vs_jax_other.png").is_file()
 
 
 def test_duplicate_names_are_found_when_one_run_is_picked():

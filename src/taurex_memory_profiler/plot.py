@@ -1497,10 +1497,11 @@ def parse_args(argv=None):
     parser.add_argument("--killed-c", action="store_true", help="mark the third run as OOM-killed")
     parser.add_argument("--delete-old", dest="old_runs", action="store_const", const="delete",
                         help="when several runs share a name, delete the older ones "
-                             "without asking")
+                             "[default]")
     parser.add_argument("--keep-old", dest="old_runs", action="store_const", const="keep",
-                        help="keep every run that shares a name, without asking")
-    parser.set_defaults(old_runs=None)
+                        help="keep every run that shares a name, instead of deleting "
+                             "the older ones")
+    parser.set_defaults(old_runs="delete")
     return parser.parse_args(argv)
 
 
@@ -1568,12 +1569,14 @@ def prune_duplicate_runs(runs: list[Run], policy: str | None) -> list[Run]:
     """Drop the runs a newer run with the same name has replaced.
 
     Two runs that share a name also share the figure names, so only the run
-    written last is plotted; the older ones are offered for deletion first.
-    The other runs of that name are looked for in the whole log directory and
-    not only among the runs being plotted: picking one job, with ``--job`` or
-    by taking the newest of the directory, must still find the runs it shares
-    its name with. The name is the one in ``run_<jobid>.meta``, not the label
-    the command line gave the run for the comparison figure.
+    written last is plotted; the older ones are deleted first, unless `policy`
+    is ``keep``. A run renamed on the command line with ``LABEL=`` writes under
+    another name, so it does not collide with the runs of the name in its meta
+    and is left alone. The other runs of that name are looked for in the whole
+    log directory and not only among the runs being plotted: picking one job,
+    with ``--job`` or by taking the newest of the directory, must still find the
+    runs it shares its name with. The name is the one in ``run_<jobid>.meta``,
+    not the label the command line gave the run for the comparison figure.
     """
     # (log directory, run name) -> {plotted job id: index in `runs`}
     groups: dict[tuple[Path, str], dict[str, int]] = {}
@@ -1589,25 +1592,30 @@ def prune_duplicate_runs(runs: list[Run], policy: str | None) -> list[Run]:
     for (base, name), plotted in groups.items():
         if len(duplicates(base, name)) < 2:
             continue
+        # The figures are named after the label, so the runs of this name only
+        # collide when a label is used twice, or is the name itself.
+        labels = [runs[index].label for index in plotted.values()]
+        if len(set(labels)) == len(labels) and name not in labels:
+            continue
         keep = max(plotted, key=lambda jobid: last_write(base, jobid))
         deleted = set(prune_duplicates(base, name, keep=keep, policy=policy))
         dropped |= {index for jobid, index in plotted.items() if jobid in deleted}
     return [run for index, run in enumerate(runs) if index not in dropped]
 
 
-def apply_label(built: list[Run], label: str | None, where) -> None:
-    """Give the runs of one command-line spec the label of that spec.
+def apply_label(surviving: list[Run], label: str | None, where) -> None:
+    """Give the label of one command-line spec to the run it left.
 
-    A spec expands to several runs only through --select, which is a whole grid
-    of runs; one label cannot name those, so it is an error rather than a figure
-    where every curve carries the same name.
+    A spec still expands to several runs after the pruning only through
+    --select, which is a whole grid of runs; one label cannot name those, so it
+    is an error rather than a figure where every curve carries the same name.
     """
-    if not label:
+    if not label or not surviving:
         return
-    if len(built) > 1:
-        sys.exit(f"ERROR: the label '{label}' would name {len(built)} runs of {where}; "
+    if len(surviving) > 1:
+        sys.exit(f"ERROR: the label '{label}' would name {len(surviving)} runs of {where}; "
                  "give each run its own LABEL=PATH#JOBID")
-    built[0].label = label
+    surviving[0].label = label
 
 
 def main(argv=None):
@@ -1615,6 +1623,9 @@ def main(argv=None):
     specs, job = collect_specs(args)
 
     runs: list[Run] = []
+    # (label, where, runs) of every spec, so the labels are applied to the runs
+    # that survive the pruning of the older namesakes below.
+    groups: list[tuple[str | None, Path, list[Run]]] = []
     logdir = Path(args.logdir).expanduser()
     for label, path, spec_job in specs:
         if path.exists():
@@ -1625,22 +1636,36 @@ def main(argv=None):
             built = build_runs(path, wanted_job, select=select)
             if not built:
                 sys.exit(f"ERROR: no memory logs found in {path}")
-            apply_label(built, label, path)
         elif is_run_name(path):
             # A bare name is a run label inside --logdir, so runs are compared
             # by name without needing their job ids.
             built = build_runs(logdir, spec_job, select=str(path))
             if not built:
                 sys.exit(f"ERROR: no run named '{path}' in {logdir}")
-            apply_label(built, label, path)
         else:
             sys.exit(f"ERROR: {path} not found")
+        groups.append((label, path, built))
         runs += built
 
     if not runs:
         sys.exit("ERROR: nothing to plot")
 
+    # A spec of one run takes its label before the pruning: the older runs of
+    # the name are pruned against the names that will be written, so a renamed
+    # run has to carry its label already. A spec of several runs (--select of a
+    # whole grid) keeps the run names until the pruning has said which collide.
+    for label, _path, built in groups:
+        if label and len(built) == 1:
+            built[0].label = label
+
     runs = prune_duplicate_runs(runs, args.old_runs)
+
+    # The label names the run that is left, so it is given after the runs of
+    # the same name have been pruned: a name that finds three jobs whose logs
+    # are old versions of one run still labels a single curve.
+    kept = {id(run) for run in runs}
+    for label, path, built in groups:
+        apply_label([run for run in built if id(run) in kept], label, path)
 
     for run in runs:
         finalize(run, args.rss, args.command)
